@@ -69,8 +69,8 @@ create function pg_temp.freeze_adp_active_clock(fixture_name text) returns void 
   update public.playback_sessions s set active_since=clock_timestamp()+interval '1 hour' from adp_test_fixtures f where f.name=fixture_name and s.id=f.session_id
 $$;
 create function pg_temp.adp_hb(fixture_name text,request_id uuid,expected_version bigint,client_seq bigint,
-  position numeric,is_playing boolean,kind text default 'periodic') returns jsonb language sql set search_path=pg_temp,public as $$
-  select public.record_playback_heartbeat_r12(v.session_id,request_id,expected_version,client_seq,position,is_playing,kind)
+  media_position numeric,is_playing boolean,kind text default 'periodic') returns jsonb language sql set search_path=pg_temp,public as $$
+  select public.record_playback_heartbeat_r12(v.session_id,request_id,expected_version,client_seq,media_position,is_playing,kind)
   from adp_test_fixtures v where v.name=fixture_name
 $$;
 

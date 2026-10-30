@@ -69,8 +69,8 @@ create function pg_temp.freeze_adp_active_clock(fixture_name text) returns void 
   update public.playback_sessions s set active_since=clock_timestamp()+interval '1 hour' from adp_test_fixtures f where f.name=fixture_name and s.id=f.session_id
 $$;
 create function pg_temp.adp_hb(fixture_name text,request_id uuid,expected_version bigint,client_seq bigint,
-  position numeric,is_playing boolean,kind text default 'periodic') returns jsonb language sql set search_path=pg_temp,public as $$
-  select public.record_playback_heartbeat_r12(v.session_id,request_id,expected_version,client_seq,position,is_playing,kind)
+  media_position numeric,is_playing boolean,kind text default 'periodic') returns jsonb language sql set search_path=pg_temp,public as $$
+  select public.record_playback_heartbeat_r12(v.session_id,request_id,expected_version,client_seq,media_position,is_playing,kind)
   from adp_test_fixtures v where v.name=fixture_name
 $$;
 
@@ -134,13 +134,17 @@ select pg_temp.reset_adp_fixture('pause_resume',0,true,5,0);
 select is((pg_temp.adp_hb('pause_resume','b4000000-0000-4000-8000-000000000001',0,1,5,false,'pause')->>'accepted')::boolean,true,'pause accepts only previously accrued active time');
 select ok((select not is_playing and active_since is null and playback_budget_seconds=0 from public.playback_sessions s join adp_test_fixtures f on s.id=f.session_id where f.name='pause_resume'),'pause clears the active-time window');
 select is((pg_temp.adp_hb('pause_resume','b4000000-0000-4000-8000-000000000002',1,2,5,true,'play')->>'accepted')::boolean,true,'resume enters a new active window');
+reset role;
 update public.playback_sessions s set active_since=clock_timestamp()-interval '3 seconds' from adp_test_fixtures f where f.name='pause_resume' and s.id=f.session_id;
+set local role authenticated;
 select is((pg_temp.adp_hb('pause_resume','b4000000-0000-4000-8000-000000000003',2,3,8,false,'pause')->>'accepted')::boolean,true,'resume accrues only the new server-time window');
 select pg_temp.reset_adp_fixture('buffer',0,true,3,0);
 select is((pg_temp.adp_hb('buffer','bf000000-0000-4000-8000-000000000001',0,1,3,false,'buffering')->>'accepted')::boolean,true,'buffer event stops active accounting');
 select is((pg_temp.adp_hb('buffer','bf000000-0000-4000-8000-000000000002',1,2,4,false,'pause')->>'code'),'playback_budget_exceeded','buffered time cannot advance watched position');
 select is((pg_temp.adp_hb('buffer','bf000000-0000-4000-8000-000000000003',1,3,3,true,'play')->>'accepted')::boolean,true,'buffer recovery establishes a fresh active window');
+reset role;
 update public.playback_sessions s set active_since=clock_timestamp()-interval '2 seconds' from adp_test_fixtures f where f.name='buffer' and s.id=f.session_id;
+set local role authenticated;
 select is((pg_temp.adp_hb('buffer','bf000000-0000-4000-8000-000000000004',2,4,5,true,'periodic')->>'accepted')::boolean,true,'playback progresses after buffer recovery using only new active time');
 
 -- High-water ordering is independent of expected_version. Delayed older events
@@ -177,7 +181,9 @@ do $$ declare i integer;sid uuid;req uuid:='be000000-0000-4000-8000-000000000001
   r:=public.record_playback_heartbeat_r12(sid,req,0,1,0,false,'pause');
   if r->>'duplicate'<>'true' or r->>'version'<>'1' then raise exception 'old retry did not preserve original result: %',r;end if;
 end $$;
+reset role;
 select ok((select count(*)>=520 from public.playback_heartbeat_requests q join adp_test_fixtures f on f.session_id=q.session_id where f.name='delay'),'active-session receipts are not pruned');
+set local role authenticated;
 
 -- Watched interval repositioning and gaps.
 select pg_temp.reset_adp_fixture('reposition',10,false,0,0); select pg_temp.seed_adp_intervals('reposition','[[0,10]]');
@@ -197,10 +203,14 @@ select is((pg_temp.adp_hb('gap_01','b9000000-0000-4000-8000-000000000001',0,1,10
 select pg_temp.reset_adp_fixture('gap_075',100,false,0,0);select pg_temp.seed_adp_intervals('gap_075','[[0,50],[50.75,100]]');
 select is((pg_temp.adp_hb('gap_075','ba000000-0000-4000-8000-000000000001',0,1,100,false,'complete')->>'complete')::boolean,false,'0.75 second gap prevents completion');
 select pg_temp.reset_adp_fixture('full',100,false,0,0);select pg_temp.seed_adp_intervals('full','[[0,100]]');
+reset role;
 insert into public.user_video_progress(user_id,video_id,watched_seconds,completed_at)
   select 'a1000000-0000-4000-8000-000000000001',video_id,100,'2026-01-01T00:00:00Z' from adp_test_fixtures where name='full';
+set local role authenticated;
+reset role;
 insert into public.completion_records(user_id,video_id,completed_at,method)
   select 'a1000000-0000-4000-8000-000000000001',video_id,'2026-01-01T00:00:00Z','admin_override' from adp_test_fixtures where name='full';
+set local role authenticated;
 select is((pg_temp.adp_hb('full','bb000000-0000-4000-8000-000000000001',0,1,100,false,'complete')->>'complete')::boolean,true,'exact full coverage completes');
 select is((pg_temp.adp_hb('full','bb000000-0000-4000-8000-000000000002',1,2,100,false,'complete')->>'complete')::boolean,true,'completion remains idempotent on later heartbeat');
 select is((select count(*) from public.verified_completion_records c join adp_test_fixtures f using(video_id) where f.name='full'),1::bigint,'verified completion is stored in its separate table once');
@@ -216,7 +226,9 @@ select is((pg_temp.adp_hb('missing_end','bd000000-0000-4000-8000-000000000001',0
 select pg_temp.reset_adp_fixture('late',0,true,45,0);
 select is((pg_temp.adp_hb('late','be100000-0000-4000-8000-000000000001',0,1,45,true,'periodic')->>'accepted')::boolean,true,'delayed heartbeat uses only accumulated database active time');
 select pg_temp.reset_adp_fixture('rejection',5,true,1,0);select pg_temp.seed_adp_intervals('rejection','[[0,5]]');
+reset role;
 insert into public.user_video_progress(user_id,video_id,watched_seconds) select 'a1000000-0000-4000-8000-000000000001',video_id,5 from adp_test_fixtures where name='rejection';
+set local role authenticated;
 select is((pg_temp.adp_hb('rejection','c0000000-0000-4000-8000-000000000001',0,1,10,true,'periodic')->>'code'),'playback_budget_exceeded','too-fast heartbeat is rejected');
 select ok((select session_version=0 and playback_budget_seconds=0 and last_position=5 from public.playback_sessions s join adp_test_fixtures f on s.id=f.session_id where f.name='rejection'),'rejection leaves session budget position and version unchanged');
 select is((select count(*) from public.watched_intervals i join adp_test_fixtures f using(video_id) where f.name='rejection'),1::bigint,'rejection leaves intervals unchanged');
@@ -226,9 +238,13 @@ select is((select watched_seconds from public.user_video_progress p join adp_tes
 -- durable; its retry after expiry returns the original result. New requests at
 -- expiry are rejected and receipt retries repeat that rejection.
 select pg_temp.reset_adp_fixture('expiry',0,false,0,0);
+reset role;
 update public.playback_sessions s set started_at=clock_timestamp()-interval '12 hours'+interval '2 seconds' from adp_test_fixtures f where f.name='expiry' and s.id=f.session_id;
+set local role authenticated;
 select is((pg_temp.adp_hb('expiry','c2000000-0000-4000-8000-000000000001',0,1,0,false,'pause')->>'accepted')::boolean,true,'heartbeat just before expiry is accepted');
+reset role;
 update public.playback_sessions s set started_at=clock_timestamp()-interval '12 hours'-interval '1 millisecond' from adp_test_fixtures f where f.name='expiry' and s.id=f.session_id;
+set local role authenticated;
 select is((pg_temp.adp_hb('expiry','c2000000-0000-4000-8000-000000000001',0,1,0,false,'pause')->>'duplicate')::boolean,true,'accepted retry after expiry returns original receipt');
 select is((pg_temp.adp_hb('expiry','c2000000-0000-4000-8000-000000000002',1,2,0,false,'pause')->>'code'),'session_expired','new heartbeat after expiry is rejected');
 select is((pg_temp.adp_hb('expiry','c2000000-0000-4000-8000-000000000002',1,2,0,false,'pause')->>'duplicate')::boolean,true,'expiry rejection retry is idempotent');
@@ -240,8 +256,12 @@ select is((pg_temp.adp_hb('expiry','c2000000-0000-4000-8000-000000000002',1,2,0,
 
 -- Existing completion/progress values are not overwritten by heartbeat updates.
 select pg_temp.reset_adp_fixture('preserve',5,false,0,0);select pg_temp.seed_adp_intervals('preserve','[[0,5]]');
+reset role;
 insert into public.user_video_progress(user_id,video_id,watched_seconds,completed_at) select 'a1000000-0000-4000-8000-000000000001',video_id,5,'2026-01-01T00:00:00Z' from adp_test_fixtures where name='preserve';
+set local role authenticated;
+reset role;
 insert into public.completion_records(user_id,video_id,completed_at,method) select 'a1000000-0000-4000-8000-000000000001',video_id,'2026-01-01T00:00:00Z','admin_override' from adp_test_fixtures where name='preserve';
+set local role authenticated;
 select is((pg_temp.adp_hb('preserve','c1000000-0000-4000-8000-000000000001',0,1,5,false,'complete')->>'accepted')::boolean,true,'existing progress supports normal heartbeat');
 select is((select method from public.completion_records c join adp_test_fixtures f using(video_id) where f.name='preserve'),'admin_override','existing completion method is preserved');
 select is((select completed_at::date from public.completion_records c join adp_test_fixtures f using(video_id) where f.name='preserve'),'2026-01-01'::date,'existing completion timestamp is preserved');
