@@ -87,8 +87,9 @@ def main() -> int:
         insert into public.authorized_discord_ids(discord_id,added_by) values('{discord_id}','local-test');
         insert into public.videos(id,title,duration_seconds,legacy_duration_seconds,duration_precision_verified,duration_verified_at,published)
         values('{video}','ADP concurrency test',100,100,true,clock_timestamp(),true);
-        insert into public.playback_sessions(id,user_id,video_id,last_position,started_at,last_heartbeat_at,is_playing,active,session_version,last_event_sequence,playback_budget_seconds)
-        values('{session}','{uid}','{video}',0,clock_timestamp(),clock_timestamp(),false,true,0,0,0);
+        update public.videos set asset_id=id::text where id='{video}';
+        insert into public.playback_sessions(id,user_id,video_id,last_position,started_at,last_heartbeat_at,is_playing,active,session_version,last_event_sequence,playback_budget_seconds,asset_identity)
+        values('{session}','{uid}','{video}',0,clock_timestamp(),clock_timestamp(),false,true,0,0,0,(select public.adp_asset_identity(v) from public.videos v where id='{video}'));
         commit;
         """
         run_sql(url, psql, setup)

@@ -14,7 +14,7 @@ export default async function Library() {
     adminDb.from('videos').select('*').eq('published', true).order('sort_order'),
     adminDb.from('user_video_progress').select('video_id,verified_watched_seconds,completed_at').eq('user_id', member.id),
     adminDb.from('completion_records').select('video_id,completed_at,method').eq('user_id', member.id),
-    adminDb.from('verified_completion_records').select('video_id,asset_id,duration_seconds,completed_at,validator_version').eq('user_id', member.id),
+    adminDb.from('verified_completion_records').select('video_id,asset_id,duration_seconds,completed_at,validator_version,asset_identity,reset_at,verified_at').eq('user_id', member.id),
   ])
   const progress = new Map((rows ?? []).map((row: any) => [row.video_id, row]))
   const thumbnailTokens = new Map(await Promise.all((videos ?? []).filter((video) => video.playback_id)

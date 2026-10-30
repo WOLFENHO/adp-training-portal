@@ -50,3 +50,20 @@ test('historical completion is not reported as verified completion', () => {
   assert.equal(summary.currentVerified, false)
 })
 
+
+test('delayed rejected stop cannot recover after a newer playback intent', () => {
+ for (const kind of ['pause','buffering']) {
+ assert.equal(transitionRecoveryKind(kind,false,true,false,1,2),null)
+ assert.equal(transitionRecoveryKind(kind,false,true,false,2,2),kind)
+ }
+})
+
+test('completion requires the exact current asset identity and excludes reset/unbound records',()=>{
+ const video={asset_id:'asset-a',duration_seconds:100,duration_precision_verified:true}
+ const row={asset_id:'asset-a',duration_seconds:100,validator_version:12,completed_at:'2026-01-01T00:00:00Z'}
+ for(const variation of [{}, {asset_identity:'asset-b:100.000:12'}, {asset_identity:'asset-a:100.000:12',reset_at:'2026-02-01T00:00:00Z'}]) {
+  const result=summarizeVideoProgress(video,null,[{...row,...variation}],[])
+  assert.equal(result.currentVerified,false);assert.equal(result.status,'historical_completed')
+ }
+ assert.equal(summarizeVideoProgress(video,null,[{...row,asset_identity:'asset-a:100.000:12'}],[]).currentVerified,true)
+})

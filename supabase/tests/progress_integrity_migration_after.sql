@@ -24,5 +24,5 @@ begin
 end $$;
 delete from public.authorized_discord_ids where discord_id='991110000000000001';
 delete from public.videos where id='a1110000-0000-4000-8000-000000000002';
-delete from public.auth.users where id='a1110000-0000-4000-8000-000000000001';
+delete from auth.users where id='a1110000-0000-4000-8000-000000000001';
 drop table public.adp_release12_migration_snapshot;

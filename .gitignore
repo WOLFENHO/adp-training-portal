@@ -4,3 +4,17 @@ node_modules
 !.env.example
 *.tsbuildinfo
 vercel
+
+.adp-build.lock
+# Local tooling and generated deliverables
+.vercel/
+work/
+outputs/
+__pycache__/
+*.py[cod]
+supabase/.temp/
+supabase/.branches/
+*.dump
+*.backup
+*.pem
+*.key

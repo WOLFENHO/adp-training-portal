@@ -11,7 +11,8 @@ export function bindPauseBufferEvents(media, { onPause, onBuffering }) {
 }
 
 /** A rejected stop transition is retried from server-confirmed time once. */
-export function transitionRecoveryKind(kind, accepted, serverPlaying, alreadyAttempted) {
+export function transitionRecoveryKind(kind, accepted, serverPlaying, alreadyAttempted, eventGeneration = 0, currentGeneration = 0) {
+  if (eventGeneration !== currentGeneration) return null
   if (accepted || !serverPlaying || alreadyAttempted) return null
   if (kind === 'pause' || kind === 'buffering') return kind
   return null

@@ -29,13 +29,14 @@ begin
   insert into public.authorized_discord_ids(discord_id,added_by) values('999999999999999998','local-test');
   insert into public.videos(id,title,description,duration_seconds,legacy_duration_seconds,duration_precision_verified,published)
     select video_id,'progress test','test fixture',100,100,true,true from adp_test_fixtures;
+  update public.videos set asset_id='fixture-'||id::text where id in(select video_id from adp_test_fixtures);
   update public.adp_playback_control set enabled=true where singleton;
   update public.videos set duration_seconds=300,legacy_duration_seconds=300 where id=(select video_id from adp_test_fixtures where name='continuous');
   update public.videos set duration_precision_verified=false,duration_verified_at=null
     where id in(select video_id from adp_test_fixtures where name in('duration_match','duration_mismatch','duration_shorter','duration_longer','duration_new'));
   insert into public.playback_sessions(id,user_id,video_id,last_position,last_heartbeat_at,started_at,is_playing,active,
-    session_version,last_event_sequence,active_since,playback_budget_seconds)
-    select session_id,uid,video_id,0,clock_timestamp(),clock_timestamp(),false,true,0,0,null,0 from adp_test_fixtures;
+    session_version,last_event_sequence,active_since,playback_budget_seconds,asset_identity)
+    select session_id,uid,video_id,0,clock_timestamp(),clock_timestamp(),false,true,0,0,null,0,public.adp_asset_identity(v) from adp_test_fixtures f join public.videos v on v.id=f.video_id;
 end $$;
 
 create function pg_temp.reset_adp_fixture(fixture_name text,new_position numeric default 0,playing boolean default false,
@@ -73,6 +74,8 @@ create function pg_temp.adp_hb(fixture_name text,request_id uuid,expected_versio
   from adp_test_fixtures v where v.name=fixture_name
 $$;
 
+select set_config('request.jwt.claim.role','service_role',true);
+
 -- Verify reconciliation preserves interval rows: exact legacy duration retains
 -- their coverage; a changed duration caps historical coverage one millisecond
 -- before the new endpoint and requires fresh endpoint coverage.
@@ -92,9 +95,9 @@ select is(coalesce((select verified_watched_seconds from public.user_video_progr
 select is((select max(completion_end_seconds) from public.watched_intervals i join adp_test_fixtures f using(video_id) where f.name='duration_mismatch'),null::numeric,'duration reconciliation leaves legacy intervals unverified');
 select is((select count(*) from public.watched_intervals i join adp_test_fixtures f using(video_id) where f.name='duration_mismatch'),2::bigint,'mismatched duration reconciliation deletes no intervals');
 select is((select max(end_seconds) from public.watched_intervals i join adp_test_fixtures f using(video_id) where f.name='duration_mismatch'),100::numeric,'legacy intervals extending beyond the verified duration remain preserved');
-select is((select max(completion_end_seconds) from public.watched_intervals i join adp_test_fixtures f using(video_id) where f.name='duration_shorter'),98.999::numeric,'R1.2 intervals on a shorter verified asset require the endpoint millisecond again');
-select is((select max(completion_end_seconds) from public.watched_intervals i join adp_test_fixtures f using(video_id) where f.name='duration_longer'),99.999::numeric,'R1.2 intervals on a longer verified asset cannot cover the old/new boundary by inference');
-select is((select max(completion_end_seconds) from public.watched_intervals i join adp_test_fixtures f using(video_id) where f.name='duration_new'),100::numeric,'R1.2 intervals remain eligible when Mux duration matches the legacy duration');
+select is((select max(completion_end_seconds) from public.watched_intervals i join adp_test_fixtures f using(video_id) where f.name='duration_shorter'),null::numeric,'unbound intervals cannot gain shorter-asset eligibility');
+select is((select max(completion_end_seconds) from public.watched_intervals i join adp_test_fixtures f using(video_id) where f.name='duration_longer'),null::numeric,'unbound intervals cannot gain longer-asset eligibility');
+select is((select max(completion_end_seconds) from public.watched_intervals i join adp_test_fixtures f using(video_id) where f.name='duration_new'),null::numeric,'matching duration does not bind unbound intervals');
 select is((select count(*) from public.verified_completion_records c join adp_test_fixtures f using(video_id) where f.name='duration_match'),0::bigint,'legacy coverage cannot create verified completion');
 select throws_ok($$select public.adp_sync_verified_duration('a2220000-0000-4000-8000-000000000002','missing-asset','missing-playback',100)$$,'P0001','video not found','failed duration database update leaves metadata unverified');
 
@@ -113,7 +116,7 @@ do $$ declare i integer;result jsonb;sid uuid;vid uuid;begin
   end loop;
   if (select count(*) from public.watched_intervals where video_id=vid)<>24 then raise exception 'heartbeat intervals were not persisted';end if;
 end $$;
-select ok((select session_version=24 and last_position=192 and is_playing from public.playback_sessions s join adp_test_fixtures f using(session_id) where f.name='continuous'),'continuous playback consumes only server elapsed time and no reserve exists');
+select ok((select session_version=24 and last_position=192 and is_playing from public.playback_sessions s join adp_test_fixtures f on s.id=f.session_id where f.name='continuous'),'continuous playback consumes only server elapsed time and no reserve exists');
 
 -- Paused increments cannot advance by even one stored millisecond. Rejection
 -- preserves position, budget, version, intervals and progress; ordering metadata
@@ -121,7 +124,7 @@ select ok((select session_version=24 and last_position=192 and is_playing from p
 select pg_temp.reset_adp_fixture('paused_burst',0,false,0,0);
 select is((pg_temp.adp_hb('paused_burst','b2000000-0000-4000-8000-000000000001',0,1,0.001,false,'pause')->>'code'),'playback_budget_exceeded','paused advancement has no precision reserve');
 select is((pg_temp.adp_hb('paused_burst','b2000000-0000-4000-8000-000000000002',0,2,0.002,false,'pause')->>'code'),'playback_budget_exceeded','new request IDs do not renew an allowance');
-select ok((select last_position=0 and playback_budget_seconds=0 and session_version=0 from public.playback_sessions s join adp_test_fixtures f using(session_id) where f.name='paused_burst'),'rejected requests leave accepted playback state unchanged');
+select ok((select last_position=0 and playback_budget_seconds=0 and session_version=0 from public.playback_sessions s join adp_test_fixtures f on s.id=f.session_id where f.name='paused_burst'),'rejected requests leave accepted playback state unchanged');
 select pg_temp.reset_adp_fixture('active_burst',0,true,0,0); select pg_temp.freeze_adp_active_clock('active_burst');
 select is((pg_temp.adp_hb('active_burst','b3000000-0000-4000-8000-000000000001',0,1,0.001,true,'periodic')->>'code'),'playback_budget_exceeded','no reserve is granted during active playback');
 select is((pg_temp.adp_hb('active_burst','b3000000-0000-4000-8000-000000000002',0,2,0.002,true,'periodic')->>'code'),'playback_budget_exceeded','rapid active increments cannot renew a tolerance');
@@ -129,7 +132,7 @@ select is((pg_temp.adp_hb('active_burst','b3000000-0000-4000-8000-000000000002',
 -- Accepted pauses and buffering transitions stop the clock. Resume starts a new server window.
 select pg_temp.reset_adp_fixture('pause_resume',0,true,5,0);
 select is((pg_temp.adp_hb('pause_resume','b4000000-0000-4000-8000-000000000001',0,1,5,false,'pause')->>'accepted')::boolean,true,'pause accepts only previously accrued active time');
-select ok((select not is_playing and active_since is null and playback_budget_seconds=0 from public.playback_sessions s join adp_test_fixtures f using(session_id) where f.name='pause_resume'),'pause clears the active-time window');
+select ok((select not is_playing and active_since is null and playback_budget_seconds=0 from public.playback_sessions s join adp_test_fixtures f on s.id=f.session_id where f.name='pause_resume'),'pause clears the active-time window');
 select is((pg_temp.adp_hb('pause_resume','b4000000-0000-4000-8000-000000000002',1,2,5,true,'play')->>'accepted')::boolean,true,'resume enters a new active window');
 update public.playback_sessions s set active_since=clock_timestamp()-interval '3 seconds' from adp_test_fixtures f where f.name='pause_resume' and s.id=f.session_id;
 select is((pg_temp.adp_hb('pause_resume','b4000000-0000-4000-8000-000000000003',2,3,8,false,'pause')->>'accepted')::boolean,true,'resume accrues only the new server-time window');
@@ -150,7 +153,7 @@ select is((pg_temp.adp_hb('ordering','b5000000-0000-4000-8000-000000000003',1,2,
 select is((pg_temp.adp_hb('ordering','b5000000-0000-4000-8000-000000000004',2,1,2,true,'play')->>'code'),'stale_event','older playing event cannot reactivate a paused session');
 select is((pg_temp.adp_hb('ordering','b5000000-0000-4000-8000-000000000005',2,3,2,true,'play')->>'accepted')::boolean,true,'newer play recovers with authoritative version and sequence');
 select is((pg_temp.adp_hb('ordering','b5000000-0000-4000-8000-000000000006',3,2,2,false,'buffering')->>'code'),'stale_event','delayed buffering cannot override newer active playback');
-select ok((select is_playing from public.playback_sessions s join adp_test_fixtures f using(session_id) where f.name='ordering'),'newer active state remains after delayed buffering event');
+select ok((select is_playing from public.playback_sessions s join adp_test_fixtures f on s.id=f.session_id where f.name='ordering'),'newer active state remains after delayed buffering event');
 
 -- Malformed and malicious sequence inputs do not consume ordering state.
 select pg_temp.reset_adp_fixture('malformed',0,false,0,0);
@@ -158,11 +161,11 @@ select is((public.record_playback_heartbeat_r12((select session_id from adp_test
 select is((public.record_playback_heartbeat_r12((select session_id from adp_test_fixtures where name='malformed'),gen_random_uuid(),0,1,0,false,'play')->>'code'),'invalid_event_state','invalid event state does not consume a sequence');
 select is((pg_temp.adp_hb('malformed','b5100000-0000-4000-8000-000000000001',0,9007199254740991,0,false,'pause')->>'code'),'sequence_out_of_range','maliciously large sequence is rejected without poisoning high-water');
 select is((pg_temp.adp_hb('malformed','b5100000-0000-4000-8000-000000000002',0,1,0,false,'pause')->>'accepted')::boolean,true,'legitimate sequence recovers after rejected large sequence');
-select is((select last_event_sequence from public.playback_sessions s join adp_test_fixtures f using(session_id) where f.name='malformed'),1::bigint,'only a valid in-range event advances high-water');
+select is((select last_event_sequence from public.playback_sessions s join adp_test_fixtures f on s.id=f.session_id where f.name='malformed'),1::bigint,'only a valid in-range event advances high-water');
 select set_config('request.jwt.claim.sub','a2000000-0000-4000-8000-000000000002',true);
 select throws_ok($$select public.record_playback_heartbeat_r12((select session_id from adp_test_fixtures where name='malformed'),'b5200000-0000-4000-8000-000000000001',1,2,0,false,'pause')$$,'P0001','session_invalid','another authorized member cannot consume this session sequence');
 select set_config('request.jwt.claim.sub','a1000000-0000-4000-8000-000000000001',true);
-select is((select last_event_sequence from public.playback_sessions s join adp_test_fixtures f using(session_id) where f.name='malformed'),1::bigint,'wrong-owner request leaves ordering high-water unchanged');
+select is((select last_event_sequence from public.playback_sessions s join adp_test_fixtures f on s.id=f.session_id where f.name='malformed'),1::bigint,'wrong-owner request leaves ordering high-water unchanged');
 select ok(not exists(select 1 from information_schema.columns where table_schema='public' and table_name='playback_sessions' and column_name='precision_reserve_seconds'),'no per-session precision allowance exists to renew');
 
 -- Receipts remain idempotent beyond the former 511-row pruning boundary.
@@ -215,7 +218,7 @@ select is((pg_temp.adp_hb('late','be100000-0000-4000-8000-000000000001',0,1,45,t
 select pg_temp.reset_adp_fixture('rejection',5,true,1,0);select pg_temp.seed_adp_intervals('rejection','[[0,5]]');
 insert into public.user_video_progress(user_id,video_id,watched_seconds) select 'a1000000-0000-4000-8000-000000000001',video_id,5 from adp_test_fixtures where name='rejection';
 select is((pg_temp.adp_hb('rejection','c0000000-0000-4000-8000-000000000001',0,1,10,true,'periodic')->>'code'),'playback_budget_exceeded','too-fast heartbeat is rejected');
-select ok((select session_version=0 and playback_budget_seconds=0 and last_position=5 from public.playback_sessions s join adp_test_fixtures f using(session_id) where f.name='rejection'),'rejection leaves session budget position and version unchanged');
+select ok((select session_version=0 and playback_budget_seconds=0 and last_position=5 from public.playback_sessions s join adp_test_fixtures f on s.id=f.session_id where f.name='rejection'),'rejection leaves session budget position and version unchanged');
 select is((select count(*) from public.watched_intervals i join adp_test_fixtures f using(video_id) where f.name='rejection'),1::bigint,'rejection leaves intervals unchanged');
 select is((select watched_seconds from public.user_video_progress p join adp_test_fixtures f using(video_id) where f.name='rejection'),5::numeric,'rejection leaves progress unchanged');
 
@@ -229,7 +232,7 @@ update public.playback_sessions s set started_at=clock_timestamp()-interval '12 
 select is((pg_temp.adp_hb('expiry','c2000000-0000-4000-8000-000000000001',0,1,0,false,'pause')->>'duplicate')::boolean,true,'accepted retry after expiry returns original receipt');
 select is((pg_temp.adp_hb('expiry','c2000000-0000-4000-8000-000000000002',1,2,0,false,'pause')->>'code'),'session_expired','new heartbeat after expiry is rejected');
 select is((pg_temp.adp_hb('expiry','c2000000-0000-4000-8000-000000000002',1,2,0,false,'pause')->>'duplicate')::boolean,true,'expiry rejection retry is idempotent');
-select ok((select not active and not is_playing and active_since is null from public.playback_sessions s join adp_test_fixtures f using(session_id) where f.name='expiry'),'expired session cannot reactivate');
+select ok((select not active and not is_playing and active_since is null from public.playback_sessions s join adp_test_fixtures f on s.id=f.session_id where f.name='expiry'),'expired session cannot reactivate');
 set local role service_role;
 select is(public.cleanup_expired_playback_receipts(),2,'receipt cleanup removes rows only after session expiry');
 set local role authenticated;

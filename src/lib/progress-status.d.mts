@@ -1,5 +1,5 @@
 type VideoVersion = { asset_id: string | null; duration_seconds: number; duration_precision_verified: boolean }
-type VerifiedCompletion = { asset_id: string; duration_seconds: number; validator_version: number; completed_at: string }
+type VerifiedCompletion = { asset_id: string; duration_seconds: number; validator_version: number; completed_at: string; asset_identity?: string | null; reset_at?: string | null; verified_at?: string | null }
 type HistoricalCompletion = { completed_at: string; method?: string }
 type ProgressRow = { verified_watched_seconds?: number | null; completed_at?: string | null }
 export function summarizeVideoProgress(video: VideoVersion, progress: ProgressRow | null | undefined, verifiedRows?: VerifiedCompletion[], historicalRows?: HistoricalCompletion[]): {

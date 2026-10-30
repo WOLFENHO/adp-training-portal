@@ -16,9 +16,9 @@ export default async function Watch({params}:{params:Promise<{id:string}>}) {
   if (!video) notFound()
   const [{ data: progress }, { data: intervals }, { data: history }, { data: verified }] = await Promise.all([
     adminDb.from('user_video_progress').select('verified_watched_seconds,completed_at').eq('video_id',id).eq('user_id',member.id).maybeSingle(),
-    adminDb.from('watched_intervals').select('start_seconds,end_seconds,verification_source,completion_eligible,completion_end_seconds').eq('video_id',id).eq('user_id',member.id).eq('verification_source','release_1_2'),
+    adminDb.from('watched_intervals').select('start_seconds,end_seconds,verification_source,completion_eligible,completion_end_seconds').eq('video_id',id).eq('user_id',member.id).eq('verification_source','release_1_2').is('reset_at',null).eq('asset_identity',`${video.asset_id}:${Number(video.duration_seconds).toFixed(3)}:12`),
     adminDb.from('completion_records').select('completed_at,method').eq('video_id',id).eq('user_id',member.id),
-    adminDb.from('verified_completion_records').select('asset_id,duration_seconds,completed_at,validator_version').eq('video_id',id).eq('user_id',member.id),
+    adminDb.from('verified_completion_records').select('asset_id,duration_seconds,completed_at,validator_version,asset_identity,reset_at,verified_at').eq('video_id',id).eq('user_id',member.id),
   ])
   const visibleIntervals = (intervals ?? [])
     .filter((row) => !video.duration_precision_verified || row.completion_eligible)

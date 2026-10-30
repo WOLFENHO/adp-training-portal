@@ -33,7 +33,7 @@ export async function POST(request: Request) {
   const rpcStartedAt = new Date().toISOString()
   const supabase = await createClient()
   const { data: release, error: releaseError } = await supabase.rpc('adp_playback_integrity_version')
-  if (releaseError || release !== 12) {
+  if (releaseError || release !== 121) {
     console.error('[ADP playback] Release 1.2 schema is unavailable', { code: releaseError?.code, message: releaseError?.message, version: release ?? null })
     return NextResponse.json({ accepted: false, code: 'playback_schema_unavailable', error: 'Verified playback is disabled until the Release 1.2 database migration is complete.' }, { status: 503 })
   }

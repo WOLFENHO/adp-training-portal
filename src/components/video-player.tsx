@@ -2,11 +2,13 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import MuxPlayer from '@mux/mux-player-react'
+import { readHeartbeatResponse } from '@/lib/heartbeat-response.mjs'
 import { bindPauseBufferEvents, requiresServerPlayActivation, transitionRecoveryKind } from '@/lib/player-lifecycle.mjs'
 
 type HeartbeatKind = 'play' | 'pause' | 'buffering' | 'periodic' | 'seek' | 'complete'
 type Heartbeat = {
   requestId: string
+  intentGeneration: number
   clientSequence: number
   position: number
   isPlaying: boolean
@@ -47,6 +49,7 @@ export function VideoPlayer({
   initialIntervals,
   complete,
   durationVerified,
+  mediaComponent: MediaPlayer = MuxPlayer,
 }: {
   videoId: string
   playbackId: string | null
@@ -55,6 +58,8 @@ export function VideoPlayer({
   initialIntervals: Interval[]
   complete: boolean
   durationVerified: boolean
+  /** Local integration harness may inject a media adapter; production uses Mux. */
+  mediaComponent?: typeof MuxPlayer
 }) {
   const ref = useRef<any>(null)
   const container = useRef<HTMLDivElement | null>(null)
@@ -133,9 +138,13 @@ export function VideoPlayer({
     }
   }, [videoId])
 
+  const intentGeneration = useRef(0)
   const save = useCallback((pos: number, isPlaying: boolean, kind: HeartbeatKind) => {
+    if (kind === 'play' || kind === 'pause' || kind === 'buffering') intentGeneration.current++
+    const generation = intentGeneration.current
     const scheduledAt = new Date().toISOString()
     const request: Heartbeat = {
+      intentGeneration: generation,
       requestId: crypto.randomUUID(),
       clientSequence: ++requestSequence.current,
       position: pos,
@@ -198,14 +207,7 @@ export function VideoPlayer({
               kind: item.kind,
             }),
           })
-          const contentType = response.headers.get('content-type') || '(missing)'
-          const rawBody = (await response.text()).slice(0, 1600)
-          let data: any = {}
-          try {
-            data = rawBody ? JSON.parse(rawBody) : {}
-          } catch {
-            // Preserve the bounded raw body in diagnostics.
-          }
+          const { contentType, rawBody, data } = await readHeartbeatResponse(response)
           const responseAt = new Date().toISOString()
           if (!response.ok || !data.accepted) {
             console.error('[ADP playback] heartbeat rejected', {
@@ -263,7 +265,7 @@ export function VideoPlayer({
               playbackActive.current = false
               ref.current?.pause()
               setMessage('Playback event ordering could not be resynchronized. Reopen the lesson to start a fresh session.')
-            } else if (data.code === 'session_expired' || data.code === 'session_inactive') {
+            } else if (data.code === 'session_expired' || data.code === 'session_inactive' || data.code === 'asset_version_changed') {
               playbackActive.current = false
               ref.current?.pause()
               setMessage(data.error || 'Playback session ended. Reopen the lesson from the library.')
@@ -285,6 +287,16 @@ export function VideoPlayer({
           if (!serverPlaying.current) {
             pausePending.current = false
             pauseRecoveryAttempted.current = false
+          }
+          if (data.currentSessionActive === false) {
+            playbackActive.current = false
+            activatingPlayback.current = false
+            activationRequestId.current = null
+            suppressPauseEvent.current = true
+            ref.current?.pause()
+            setPlaying(false)
+            setMessage('This session was reset or replaced. Reopen the lesson from the library.')
+            return 'rejected'
           }
           lastHeartbeat.current = Date.now()
           if (!data.duplicate || (data.currentVersion ?? data.version) === data.version) {
@@ -312,7 +324,7 @@ export function VideoPlayer({
             duplicate: data.duplicate,
             serverIsPlaying: data.serverIsPlaying,
           })
-          if (data.complete) setMessage('Training complete.')
+          if (data.complete && (!data.duplicate || (data.currentVersion ?? data.version) === data.version)) setMessage('Training complete.')
           if (item.kind === 'play' && activationRequestId.current === item.requestId) {
             activatingPlayback.current = false
             activationRequestId.current = null
@@ -359,8 +371,8 @@ export function VideoPlayer({
         }
         pendingRequest.current = null
           if (retryResult === 'rejected') {
-          const recoveryKind = transitionRecoveryKind(retrying.kind, false, serverPlaying.current, pauseRecoveryAttempted.current)
-          if (recoveryKind) {
+          const recoveryKind = transitionRecoveryKind(retrying.kind, false, serverPlaying.current, pauseRecoveryAttempted.current, retrying.intentGeneration, intentGeneration.current)
+          if (recoveryKind && retrying.intentGeneration === intentGeneration.current) {
             pauseRecoveryAttempted.current = true
             save(confirmedPosition.current, false, recoveryKind)
           } else if (retrying.kind === 'pause' || retrying.kind === 'buffering') {
@@ -368,8 +380,11 @@ export function VideoPlayer({
               ? 'Pause was not confirmed. Playback remains stopped; resume will resynchronize from confirmed progress.'
               : 'Playback is paused on the server. No rejected position was added to progress.')
           }
-          if (kind === 'periodic') periodicPending.current = false
-          return
+          // A newer intent must still be sent after an older retry was rejected.
+          if (request.intentGeneration <= retrying.intentGeneration) {
+            if (kind === 'periodic') periodicPending.current = false
+            return
+          }
         }
       }
 
@@ -377,8 +392,8 @@ export function VideoPlayer({
       const result = await send(request)
       if (result !== 'network-error') pendingRequest.current = null
       if (result === 'rejected') {
-        const recoveryKind = transitionRecoveryKind(request.kind, false, serverPlaying.current, pauseRecoveryAttempted.current)
-        if (recoveryKind) {
+        const recoveryKind = transitionRecoveryKind(request.kind, false, serverPlaying.current, pauseRecoveryAttempted.current, request.intentGeneration, intentGeneration.current)
+        if (recoveryKind && generation === intentGeneration.current) {
           // Stop server active-time accounting at the last accepted position.
           // The rejected advancement is not replayed or promoted by this recovery.
           pauseRecoveryAttempted.current = true
@@ -582,7 +597,7 @@ export function VideoPlayer({
       onPointerDown={(event) => { if (event.pointerType === 'touch') setControlsVisible((visible) => !visible); else reveal() }}
       onKeyDown={reveal}
     >
-      <MuxPlayer
+      <MediaPlayer
         ref={ref}
         playbackId={playbackId}
         tokens={{ playback: token }}

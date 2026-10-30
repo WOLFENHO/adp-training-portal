@@ -1,3 +1,4 @@
+import { createClient } from '@/lib/supabase/server'
 import { NextResponse } from 'next/server'
 import { z } from 'zod'
 import { getMember } from '@/lib/auth'
@@ -17,6 +18,10 @@ const syncUpload = (uploadId: string) => syncMuxUpload(uploadId, { mux, adminDb 
 export async function GET(request: Request) {
   const admin = await authorize()
   if (!admin) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  if (process.env.PLAYBACK_HEARTBEATS_ENABLED !== 'true') return NextResponse.json({ error: 'playback_maintenance' }, { status: 503 })
+  const readinessClient = await createClient()
+  const readiness = await readinessClient.rpc('adp_playback_integrity_version')
+  if (readiness.error || readiness.data !== 121) return NextResponse.json({error:'schema_maintenance'}, {status:503})
   const uploadId = new URL(request.url).searchParams.get('uploadId')
   if (uploadId) return NextResponse.json(await syncUpload(uploadId))
 
@@ -38,7 +43,7 @@ export async function GET(request: Request) {
     adminDb.from('videos').select('*').order('sort_order'),
     adminDb.from('user_video_progress').select('*'),
     adminDb.from('completion_records').select('user_id,video_id,completed_at,method'),
-    adminDb.from('verified_completion_records').select('user_id,video_id,asset_id,duration_seconds,completed_at,validator_version'),
+    adminDb.from('verified_completion_records').select('user_id,video_id,asset_id,duration_seconds,completed_at,validator_version,asset_identity,reset_at,verified_at'),
   ])
   const queryErrors = [profilesResult, allowedResult, videosResult, progressResult, completionsResult, verifiedCompletionsResult]
     .filter((result) => result.error)
@@ -73,6 +78,10 @@ const schema = z.discriminatedUnion('action', [
 export async function POST(request: Request) {
   const member = await authorize()
   if (!member) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  if (process.env.PLAYBACK_HEARTBEATS_ENABLED !== 'true') return NextResponse.json({ error: 'playback_maintenance' }, { status: 503 })
+  const readinessClient = await createClient()
+  const readiness = await readinessClient.rpc('adp_playback_integrity_version')
+  if (readiness.error || readiness.data !== 121) return NextResponse.json({error:'schema_maintenance'}, {status:503})
   const parsed = schema.safeParse(await request.json().catch(() => null))
   if (!parsed.success) return NextResponse.json({ error: 'invalid request', details: parsed.error.flatten() }, { status: 400 })
   const input = parsed.data
@@ -110,25 +119,11 @@ export async function POST(request: Request) {
     const { error } = await adminDb.from('videos').delete().eq('id', input.videoId)
     if (error) return NextResponse.json({ error: error.message }, { status: 400 })
   }
-  if (input.action === 'progress-reset') {
-    const { error: intervalError } = await adminDb.from('watched_intervals').delete().eq('user_id', input.userId).eq('video_id', input.videoId)
-    if (intervalError) return NextResponse.json({ error: intervalError.message }, { status: 400 })
-    const { error: progressError } = await adminDb.from('user_video_progress').delete().eq('user_id', input.userId).eq('video_id', input.videoId)
-    if (progressError) return NextResponse.json({ error: progressError.message }, { status: 400 })
-    const { error: completionError } = await adminDb.from('completion_records').delete().eq('user_id', input.userId).eq('video_id', input.videoId)
-    if (completionError) return NextResponse.json({ error: completionError.message }, { status: 400 })
-    const { error: verifiedCompletionError } = await adminDb.from('verified_completion_records').delete().eq('user_id', input.userId).eq('video_id', input.videoId)
-    if (verifiedCompletionError) return NextResponse.json({ error: verifiedCompletionError.message }, { status: 400 })
-  }
-  if (input.action === 'progress-complete') {
-    const { data: video } = await adminDb.from('videos').select('duration_seconds').eq('id', input.videoId).single()
-    if (!video?.duration_seconds) return NextResponse.json({ error: 'video not ready' }, { status: 400 })
-    const completedAt = new Date().toISOString()
-    const { error } = await adminDb.from('completion_records').upsert({ user_id: input.userId, video_id: input.videoId, completed_at: completedAt, method: 'admin_override', admin_id: member.id }, { onConflict: 'user_id,video_id', ignoreDuplicates: true })
-    if (error) return NextResponse.json({ error: error.message }, { status: 400 })
-    const { data: existingProgress } = await adminDb.from('user_video_progress').select('completed_at,verified_watched_seconds').eq('user_id', input.userId).eq('video_id', input.videoId).maybeSingle()
-    const { error: progressError } = await adminDb.from('user_video_progress').upsert({ user_id: input.userId, video_id: input.videoId, watched_seconds: video.duration_seconds, verified_watched_seconds: existingProgress?.verified_watched_seconds ?? 0, completed_at: existingProgress?.completed_at ?? completedAt, updated_at: completedAt }, { onConflict: 'user_id,video_id' })
-    if (progressError) return NextResponse.json({ error: progressError.message }, { status: 400 })
+  if (input.action === 'progress-reset' || input.action === 'progress-complete') {
+    const client = await createClient()
+    const { data, error } = await client.rpc('adp_admin_progress', {p_user_id:input.userId,p_video_id:input.videoId,p_action:input.action})
+    if (error) return NextResponse.json({error:error.message}, {status:400})
+    return NextResponse.json(data)
   }
   const { error: auditError } = await adminDb.from('admin_audit_log').insert({ admin_id: member.id, action: input.action, details: input })
   if (auditError) console.error('[ADP admin] audit log write failed', { action: input.action, code: auditError.code, message: auditError.message })
