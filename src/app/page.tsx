@@ -1,0 +1,4 @@
+import Link from 'next/link'
+import { getMember } from '@/lib/auth'
+import { Header } from '@/components/shell'
+export default async function Home() { const member = await getMember(); if (member) { const { redirect } = await import('next/navigation'); redirect('/library') } return <main className="shell"><Header/><section className="page" style={{paddingTop:100,maxWidth:780}}><div className="eyebrow">Private member access</div><h1>Training for the work ahead.</h1><p className="sub">A private video training library for members of the Analytics Development Program. Sign in with your authorized Discord account to continue.</p><div style={{marginTop:26}}><Link className="button" href="/auth/sign-in">Sign in with Discord</Link></div><div className="notice">Access is limited to Discord accounts approved by an ADP administrator.</div></section></main> }
