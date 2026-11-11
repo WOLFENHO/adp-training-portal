@@ -1,0 +1,7 @@
+{
+  "git": {
+    "deploymentEnabled": {
+      "feature/sites-v12-vercel": false
+    }
+  }
+}
