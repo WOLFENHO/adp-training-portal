@@ -5,6 +5,7 @@ import { adminDb } from '@/lib/supabase/admin'
 import { Header } from '@/components/shell'
 import { VideoPlayer } from '@/components/video-player'
 import { playbackToken } from '@/lib/mux'
+import { getPlaybackGate } from '@/lib/playback-gate'
 import { summarizeVideoProgress } from '@/lib/progress-status.mjs'
 
 export const dynamic = 'force-dynamic'
@@ -24,13 +25,14 @@ export default async function Watch({params}:{params:Promise<{id:string}>}) {
     .filter((row) => !video.duration_precision_verified || row.completion_eligible)
     .map((row) => ({start_seconds:row.start_seconds,end_seconds:video.duration_precision_verified?row.completion_end_seconds:row.end_seconds}))
     .filter((row) => row.end_seconds !== null)
-  const token = video.playback_id ? await playbackToken(video.playback_id,video.duration_seconds) : undefined
+  const gate = await getPlaybackGate()
+  const token = gate.enabled && video.playback_id ? await playbackToken(video.playback_id,video.duration_seconds) : undefined
   const summary = summarizeVideoProgress(video,progress,verified ?? [],history ?? [])
   return <main className="shell"><Header member={member}/><section className="page">
     <Link href="/library" className="eyebrow">← Return to library</Link>
     <h1>{video.title}</h1><p className="sub">{video.description}</p>
     {summary.status==='historical_completed'&&<div className="notice">A historical completion is on record. It is not verified coverage of this video version.</div>}
-    <VideoPlayer videoId={id} playbackId={video.playback_id} token={token} duration={video.duration_seconds}
+    <VideoPlayer videoId={id} playbackId={token ? video.playback_id : null} token={token} duration={video.duration_seconds}
       initialIntervals={visibleIntervals} complete={summary.currentVerified} durationVerified={Boolean(video.duration_precision_verified)}/>
     <div className="stat-row"><span>Verified coverage<strong>{summary.percent}%</strong></span>
       <span>Status<strong>{summary.label}</strong></span>

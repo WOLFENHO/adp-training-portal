@@ -1,9 +1,10 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import MuxPlayer from '@mux/mux-player-react'
 import { readHeartbeatResponse } from '@/lib/heartbeat-response.mjs'
-import { bindPauseBufferEvents, requiresServerPlayActivation, transitionRecoveryKind } from '@/lib/player-lifecycle.mjs'
+import { bindPauseBufferEvents, transitionRecoveryKind } from '@/lib/player-lifecycle.mjs'
+import { playbackSessionMessage } from '@/lib/maintenance-messages.mjs'
 
 type HeartbeatKind = 'play' | 'pause' | 'buffering' | 'periodic' | 'seek' | 'complete'
 type Heartbeat = {
@@ -64,6 +65,7 @@ export function VideoPlayer({
   const ref = useRef<any>(null)
   const container = useRef<HTMLDivElement | null>(null)
   const session = useRef<string | null>(null)
+  const sessionRequest = useRef<{ videoId: string; response: Promise<{ response: Response; data: any }> } | null>(null)
   const sessionVersion = useRef(0)
   const resumeAt = useRef(0)
   const lastHeartbeat = useRef(0)
@@ -72,13 +74,16 @@ export function VideoPlayer({
   const intervals = useRef(initialIntervals)
   const lastPosition = useRef(0)
   const seekBack = useRef<number | null>(null)
+  const correctingSeek = useRef(false)
+  const endedAt = useRef<number | null>(null)
   const heartbeatQueue = useRef<Promise<void>>(Promise.resolve())
   const hiddenTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const playbackActive = useRef(false)
   const serverPlaying = useRef(false)
-  const pausePending = useRef(false)
   const pauseRecoveryAttempted = useRef(false)
-  const activatingPlayback = useRef(false)
+  const bufferingMedia = useRef(false)
+  const resumingMedia = useRef(false)
+  const initializedMedia = useRef<unknown>(null)
   const activationRequestId = useRef<string | null>(null)
   const suppressPauseEvent = useRef(false)
   const confirmedPosition = useRef(0)
@@ -93,6 +98,9 @@ export function VideoPlayer({
   const [message, setMessage] = useState('Preparing secure playback…')
   const [ready, setReady] = useState(false)
   const [controlsVisible, setControlsVisible] = useState(true)
+  const [fullscreen, setFullscreen] = useState(false)
+  const tokens = useMemo(() => ({ playback: token }), [token])
+  const metadata = useMemo(() => ({ video_id: videoId }), [videoId])
 
   const isCovered = (time: number) =>
     intervals.current.some((interval) => time >= interval.start_seconds && time <= interval.end_seconds)
@@ -110,12 +118,18 @@ export function VideoPlayer({
 
   useEffect(() => {
     let alive = true
-    fetch(`/api/videos/${videoId}/session`, { method: 'POST' })
-      .then(async (response) => ({ response, data: await response.json() }))
+    if (sessionRequest.current?.videoId !== videoId) {
+      sessionRequest.current = {
+        videoId,
+        response: fetch(`/api/videos/${videoId}/session`, { method: 'POST' })
+          .then(async (response) => ({ response, data: await response.json() })),
+      }
+    }
+    sessionRequest.current.response
       .then(({ response, data }) => {
         if (!alive) return
         if (!response.ok || !data.sessionId) {
-          setMessage(data.error || 'Playback could not be started.')
+          setMessage(playbackSessionMessage(data.error, data.reason))
           setBuffering(false)
           return
         }
@@ -130,6 +144,7 @@ export function VideoPlayer({
         setMessage((data.durationVerified ?? durationVerified) ? 'Progress saves automatically.' : 'Legacy duration is unverified. Playback remains available, but verified completion is disabled until Mux metadata is synchronized.')
       })
       .catch(() => {
+        if (!alive) return
         setMessage('Playback session unavailable.')
         setBuffering(false)
       })
@@ -153,7 +168,6 @@ export function VideoPlayer({
       scheduledAt,
     }
     if (kind === 'periodic') periodicPending.current = true
-    if ((kind === 'pause' || kind === 'buffering') && !isPlaying) pausePending.current = true
     console.info('[ADP playback] heartbeat scheduled', {
       requestId: request.requestId,
       clientSequence: request.clientSequence,
@@ -173,11 +187,13 @@ export function VideoPlayer({
       }
 
       const send = async (item: Heartbeat): Promise<'accepted' | 'rejected' | 'network-error'> => {
-        if (item.kind === 'play' && activatingPlayback.current && activationRequestId.current === item.requestId) {
-          // The initial playing event may fire after media time has advanced.
-          // Start the server-active window at the last confirmed position, then
-          // seek back and resume only after that transition is accepted.
+        if (item.kind === 'play' && item.expectedVersion === undefined) {
+          // Anchor the active window before resuming the media clock.
           item.position = confirmedPosition.current
+        }
+        if (item.kind === 'seek' && item.expectedVersion === undefined) {
+          // A seek preserves the server's state after any queued stop or start.
+          item.isPlaying = serverPlaying.current
         }
         item.expectedVersion ??= sessionVersion.current
         const sentAt = new Date().toISOString()
@@ -241,12 +257,11 @@ export function VideoPlayer({
             }
             if (data.serverIsPlaying !== undefined) serverPlaying.current = data.serverIsPlaying
             if (serverPlaying.current === false) {
-              pausePending.current = false
               pauseRecoveryAttempted.current = false
             }
             if (item.kind === 'play' && activationRequestId.current === item.requestId) {
-              activatingPlayback.current = false
               activationRequestId.current = null
+              resumingMedia.current = false
               playbackActive.current = false
               setBuffering(false)
               setPlaying(false)
@@ -285,15 +300,16 @@ export function VideoPlayer({
           confirmedPosition.current = data.currentAcceptedPosition ?? data.acceptedPosition
           serverPlaying.current = data.currentServerIsPlaying ?? data.serverIsPlaying
           if (!serverPlaying.current) {
-            pausePending.current = false
             pauseRecoveryAttempted.current = false
           }
           if (data.currentSessionActive === false) {
             playbackActive.current = false
-            activatingPlayback.current = false
+            resumingMedia.current = false
             activationRequestId.current = null
-            suppressPauseEvent.current = true
-            ref.current?.pause()
+            if (ref.current && !ref.current.paused) {
+              suppressPauseEvent.current = true
+              ref.current.pause()
+            }
             setPlaying(false)
             setMessage('This session was reset or replaced. Reopen the lesson from the library.')
             return 'rejected'
@@ -326,21 +342,21 @@ export function VideoPlayer({
           })
           if (data.complete && (!data.duplicate || (data.currentVersion ?? data.version) === data.version)) setMessage('Training complete.')
           if (item.kind === 'play' && activationRequestId.current === item.requestId) {
-            activatingPlayback.current = false
             activationRequestId.current = null
-            pausePending.current = false
-            playbackActive.current = true
-            lastPosition.current = data.acceptedPosition
-            setPosition(data.acceptedPosition)
-            setBuffering(false)
-            setPlaying(true)
-            setMessage('Progress saves automatically.')
-            if (ref.current) {
-              ref.current.currentTime = data.acceptedPosition
-              void ref.current.play().catch(() => {
-                playbackActive.current = false
+            const media = ref.current
+            if (serverPlaying.current && media) {
+              resumingMedia.current = true
+              const acceptedPosition = confirmedPosition.current
+              lastPosition.current = acceptedPosition
+              if (media.currentTime !== acceptedPosition) media.currentTime = acceptedPosition
+              setPosition(acceptedPosition)
+              void media.play().catch(() => {
+                if (!resumingMedia.current) return
+                resumingMedia.current = false
                 setPlaying(false)
-                setMessage('Playback could not resume after the server confirmed the session. Press play to retry.')
+                setBuffering(false)
+                save(acceptedPosition, false, 'pause')
+                setMessage('Playback could not resume after server confirmation. Press play to retry.')
               })
             }
           }
@@ -413,8 +429,10 @@ export function VideoPlayer({
     const el = ref.current
     if (!el || !ready) return
     const loaded = () => {
-      if (resumeAt.current > 0) el.currentTime = resumeAt.current
+      if (initializedMedia.current === el) return
+      initializedMedia.current = el
       lastPosition.current = resumeAt.current
+      if (resumeAt.current > 0 && el.currentTime !== resumeAt.current) el.currentTime = resumeAt.current
       setPosition(resumeAt.current)
       setBuffering(false)
     }
@@ -433,11 +451,19 @@ export function VideoPlayer({
         save(el.currentTime, true, 'periodic')
       }
     }
+    const restorePosition = (target: number) => {
+      correctingSeek.current = true
+      seekBack.current = null
+      lastPosition.current = target
+      setPosition(target)
+      el.currentTime = target
+    }
     const time = () => {
+      if (el.seeking || correctingSeek.current) return
       const current = el.currentTime
       const prior = lastPosition.current
       if (current > prior + 1.75 && !isCovered(prior)) {
-        el.currentTime = prior
+        restorePosition(prior)
         setMessage('Forward seeking into unwatched sections is disabled.')
         return
       }
@@ -449,62 +475,83 @@ export function VideoPlayer({
       const target = el.currentTime
       const prior = lastPosition.current
       if (target > prior + 1.5 && !isForwardPathCovered(prior, target)) {
-        el.currentTime = seekBack.current ?? prior
+        restorePosition(seekBack.current ?? prior)
         setMessage('You can only seek within sections already watched.')
       } else {
+        if (endedAt.current !== null && target < endedAt.current - 0.001) endedAt.current = null
         seekBack.current = null
         lastPosition.current = target
         setPosition(target)
       }
     }
     const seeked = () => {
-      if (isCovered(el.currentTime)) save(el.currentTime, !el.paused, 'seek')
+      if (correctingSeek.current) {
+        correctingSeek.current = false
+        return
+      }
+      if (!resumingMedia.current && !activationRequestId.current && isCovered(el.currentTime)) save(el.currentTime, !el.paused, 'seek')
     }
     const play = () => {
+      if (endedAt.current !== null) return
       setBuffering(true)
-      setPlaying(false)
+      setPlaying(true)
     }
     const playingNow = () => {
-      if (requiresServerPlayActivation(serverPlaying.current, pausePending.current)) {
-        activatingPlayback.current = true
-        playbackActive.current = false
-        setPlaying(false)
-        setBuffering(true)
-        setMessage('Starting verified playback…')
-        if (!el.paused) {
-          suppressPauseEvent.current = true
-          el.pause()
-        }
-        activationRequestId.current = save(confirmedPosition.current, true, 'play')
-        return
-      }
-      playbackActive.current = true
+      if (el.paused || el.ended || endedAt.current !== null) return
+      bufferingMedia.current = false
       setPlaying(true)
       setBuffering(false)
-      save(el.currentTime, true, 'play')
-    }
-    const pause = () => {
-      if (suppressPauseEvent.current || activatingPlayback.current) {
-        suppressPauseEvent.current = false
-        setPlaying(false)
+      if (resumingMedia.current) {
+        resumingMedia.current = false
+        playbackActive.current = true
+        setMessage('Progress saves automatically.')
         return
       }
-      playbackActive.current = false
-      pauseRecoveryAttempted.current = false
+      if (playbackActive.current || activationRequestId.current) return
+      setBuffering(true)
+      setMessage('Starting verified playback…')
+      activationRequestId.current = save(confirmedPosition.current, true, 'play')
+      suppressPauseEvent.current = true
+      el.pause()
+    }
+    const pause = () => {
+      if (suppressPauseEvent.current) {
+        suppressPauseEvent.current = false
+        return
+      }
+      if (el.ended || endedAt.current !== null) return
       setPlaying(false)
+      setBuffering(false)
+      resumingMedia.current = false
+      activationRequestId.current = null
+      playbackActive.current = false
+      bufferingMedia.current = false
+      pauseRecoveryAttempted.current = false
       save(el.currentTime, false, 'pause')
     }
     const wait = () => {
+      if (el.paused || el.ended || endedAt.current !== null || el.seeking || correctingSeek.current || resumingMedia.current || bufferingMedia.current) return
+      bufferingMedia.current = true
+      const needsStop = playbackActive.current || activationRequestId.current !== null
+      activationRequestId.current = null
       playbackActive.current = false
-      pauseRecoveryAttempted.current = false
       setBuffering(true)
-      setPlaying(false)
+      if (!needsStop) return
+      pauseRecoveryAttempted.current = false
       save(el.currentTime, false, 'buffering')
     }
-    const can = () => setBuffering(false)
+    const can = () => {
+      if (el.paused && !activationRequestId.current) setBuffering(false)
+    }
     const ended = () => {
+      if (endedAt.current !== null) return
+      endedAt.current = el.currentTime
+      resumingMedia.current = false
+      activationRequestId.current = null
       playbackActive.current = false
+      bufferingMedia.current = false
       setPlaying(false)
+      setBuffering(false)
       save(el.currentTime, false, 'complete')
     }
     const periodicTimer = setInterval(() => maybePeriodic('timer'), 1000)
@@ -521,7 +568,6 @@ export function VideoPlayer({
     el.addEventListener('canplay', can)
     el.addEventListener('ended', ended)
     if (el.readyState >= 1) loaded()
-    if (!el.paused) playingNow()
     return () => {
       clearInterval(periodicTimer)
       el.removeEventListener('loadedmetadata', loaded)
@@ -536,14 +582,19 @@ export function VideoPlayer({
     }
   }, [ready, duration, save])
 
-  const seek = (value: number) => {
+  const seek = (input: HTMLInputElement) => {
     const el = ref.current
     if (!el) return
-    if (value > position + 1.5 && !isForwardPathCovered(position, value)) {
+    const value = input.valueAsNumber
+    const current = lastPosition.current
+    if (value > current + 1.5 && !isForwardPathCovered(current, value)) {
+      input.value = String(current)
+      setPosition(current)
       setMessage('That section has not been watched yet.')
       return
     }
-    seekBack.current = position
+    correctingSeek.current = false
+    seekBack.current = current
     el.currentTime = value
     setPosition(value)
   }
@@ -565,6 +616,7 @@ export function VideoPlayer({
 
   useEffect(() => {
     const onFullscreen = () => {
+      setFullscreen(document.fullscreenElement === container.current)
       setControlsVisible(true)
       if (hiddenTimer.current) clearTimeout(hiddenTimer.current)
       if (document.fullscreenElement === container.current && playing) {
@@ -578,8 +630,8 @@ export function VideoPlayer({
   const segments = Array.from({ length: Math.max(1, Math.ceil(duration)) }, (_, second) =>
     intervals.current.some((interval) => interval.start_seconds < second + 1 && interval.end_seconds > second),
   )
-  if (!playbackId || !token) {
-    return <div className="video-frame"><div className="player-placeholder">Video is processing or secure playback is unavailable.</div></div>
+  if (!playbackId || !token || !ready) {
+    return <div className="video-frame"><div className="player-placeholder" role="status">{message}</div></div>
   }
 
   return <>
@@ -600,9 +652,9 @@ export function VideoPlayer({
       <MediaPlayer
         ref={ref}
         playbackId={playbackId}
-        tokens={{ playback: token }}
+        tokens={tokens}
         streamType="on-demand"
-        metadata={{ video_id: videoId }}
+        metadata={metadata}
         playbackRates={[1]}
         disablePictureInPicture
         onVolumeChange={(event) => {
@@ -610,17 +662,50 @@ export function VideoPlayer({
           setVolume(el.volume)
           setMuted(el.muted)
         }}
+        onError={(event: any) => {
+          const errorCode = event?.detail?.error?.code ?? event?.currentTarget?.error?.code ?? null
+          console.error('[ADP playback] Mux player reported a media error', { code: errorCode })
+          setMessage('Mux could not play this video. Check the playback ID and signed token configuration.')
+          setBuffering(false)
+        }}
         style={{ width: '100%', height: '100%' }}
       />
       <div className="player-state" aria-live="polite">{buffering ? <><span className="spinner"/> Buffering</> : playing ? 'Playing' : 'Paused'}</div>
       <div className="adp-controls" aria-hidden={!controlsVisible} inert={!controlsVisible}>
-        <button className="player-button" aria-label={playing ? 'Pause video' : 'Play video'} onClick={() => playing ? ref.current?.pause() : void ref.current?.play()}>{playing ? 'Ⅱ' : '▶'}</button>
+        <button className="player-button" aria-label={playing ? 'Pause video' : 'Play video'} onClick={() => {
+          const media = ref.current
+          if (!media) return
+          if (activationRequestId.current) {
+            activationRequestId.current = null
+            setPlaying(false)
+            setBuffering(false)
+            save(confirmedPosition.current, false, 'pause')
+          } else if (!media.paused && endedAt.current === null) media.pause()
+          else {
+            endedAt.current = null
+            void media.play().catch(() => {
+              setPlaying(false)
+              setBuffering(false)
+              setMessage('Playback could not start. Press play to retry.')
+            })
+          }
+        }}>{playing ? 'Ⅱ' : '▶'}</button>
         <span className="time-label">{fmt(position)}</span>
-        <div className="timeline-wrap"><div className="timeline-track"><div className="watched-track">{segments.map((watched, second) => watched && <i key={second} style={{ left: `${second / duration * 100}%`, width: `${100 / duration}%` }}/>)}</div><div className="playhead" style={{ left: `${duration ? position / duration * 100 : 0}%` }}/><input aria-label="Video timeline" type="range" min={0} max={duration || 1} step="0.1" value={position} onChange={(event) => seek(Number(event.target.value))} onPointerDown={reveal} onFocus={reveal}/></div></div>
+        <div className="timeline-wrap"><div className="timeline-track"><div className="watched-track">{segments.map((watched, second) => watched && <i key={second} style={{ left: `${second / duration * 100}%`, width: `${100 / duration}%` }}/>)}</div><div className="playhead" style={{ left: `${duration ? position / duration * 100 : 0}%` }}/><input aria-label="Video timeline" type="range" min={0} max={duration || 1} step="0.1" value={position} onChange={(event) => seek(event.currentTarget)} onPointerDown={reveal} onFocus={reveal}/></div></div>
         <span className="time-label">{fmt(duration)}</span>
         <button className="player-button" aria-label={muted || volume === 0 ? 'Unmute' : 'Mute'} onClick={() => { reveal(); if (ref.current) { ref.current.muted = !ref.current.muted; setMuted(ref.current.muted) } }}>{muted || volume === 0 ? '×' : '◖'}</button>
         <input className="volume-slider" aria-label="Volume" type="range" min="0" max="1" step="0.05" value={muted ? 0 : volume} onChange={(event) => { reveal(); const next = Number(event.target.value); if (ref.current) { ref.current.volume = next; ref.current.muted = next === 0 } setVolume(next); setMuted(next === 0) }} onPointerDown={reveal} onFocus={reveal}/>
-        <button className="player-button" aria-label="Fullscreen" onClick={() => { reveal(); void container.current?.requestFullscreen?.() }}>⛶</button>
+        <button className="player-button" aria-label={fullscreen ? 'Exit fullscreen' : 'Fullscreen'} onClick={async () => {
+          reveal()
+          const player = container.current
+          if (!player) return
+          try {
+            if (document.fullscreenElement === player) await document.exitFullscreen()
+            else await player.requestFullscreen()
+          } catch {
+            setMessage('Fullscreen is unavailable.')
+          }
+        }}>⛶</button>
       </div>
     </div>
     <div className="notice">{complete ? 'This lesson is recorded as complete.' : message} · {confirmed}% server-confirmed</div>

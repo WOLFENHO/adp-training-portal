@@ -14,11 +14,11 @@
     "test:maintenance": "node --test supabase/tests/maintenance_routes.test.mjs",
     "test:release-concurrency": "node supabase/tests/release_1_2_1_concurrency.mjs",
     "test:heartbeat-response": "node --test supabase/tests/heartbeat_response.test.mjs",
-    "test": "node --test supabase/tests/player_lifecycle.test.mjs supabase/tests/mux_duration_sync.test.mjs supabase/tests/maintenance_routes.test.mjs supabase/tests/heartbeat_response.test.mjs supabase/tests/sql_delimiters.test.mjs"
+    "test": "node --test supabase/tests/player_lifecycle.test.mjs supabase/tests/mux_duration_sync.test.mjs supabase/tests/maintenance_routes.test.mjs supabase/tests/heartbeat_response.test.mjs supabase/tests/sql_delimiters.test.mjs src/lib/maintenance-messages.test.mjs"
   },
   "dependencies": {
-    "@mux/ts": "^16.0.0",
     "@mux/mux-player-react": "^3.14.1",
+    "@mux/ts": "^16.0.0",
     "@supabase/ssr": "^0.6.1",
     "@supabase/supabase-js": "^2.57.0",
     "next": "^15.5.0",

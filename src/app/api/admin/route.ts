@@ -3,7 +3,6 @@ import { NextResponse } from 'next/server'
 import { z } from 'zod'
 import { getMember } from '@/lib/auth'
 import { adminDb } from '@/lib/supabase/admin'
-import { mux } from '@/lib/mux'
 import { randomUUID } from 'crypto'
 import { syncMuxUpload } from '@/lib/mux-duration-sync.mjs'
 
@@ -12,30 +11,9 @@ async function authorize() {
   return member?.is_admin ? member : null
 }
 
-// The database RPC updates verification and interval reconciliation atomically.
-const syncUpload = (uploadId: string) => syncMuxUpload(uploadId, { mux, adminDb })
-
-export async function GET(request: Request) {
+export async function GET() {
   const admin = await authorize()
   if (!admin) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
-  if (process.env.PLAYBACK_HEARTBEATS_ENABLED !== 'true') return NextResponse.json({ error: 'playback_maintenance' }, { status: 503 })
-  const readinessClient = await createClient()
-  const readiness = await readinessClient.rpc('adp_playback_integrity_version')
-  if (readiness.error || readiness.data !== 121) return NextResponse.json({error:'schema_maintenance'}, {status:503})
-  const uploadId = new URL(request.url).searchParams.get('uploadId')
-  if (uploadId) return NextResponse.json(await syncUpload(uploadId))
-
-  const { data: pending, error: pendingError } = await adminDb
-    .from('videos').select('id,mux_upload_id,duration_precision_verified')
-    .eq('duration_precision_verified', false).not('mux_upload_id', 'is', null)
-  if (pendingError) {
-    console.error('[ADP admin] Could not load unverified videos', { code: pendingError.code, message: pendingError.message })
-  }
-  const syncResults = await Promise.all((pending ?? []).map((video) =>
-    video.mux_upload_id ? syncUpload(video.mux_upload_id) : Promise.resolve({
-      uploadId: '', status: 'unavailable', ready: false, verified: false, reason: 'Mux upload ID is missing.',
-    }),
-  ))
 
   const [profilesResult, allowedResult, videosResult, progressResult, completionsResult, verifiedCompletionsResult] = await Promise.all([
     adminDb.from('profiles').select('*').order('username'),
@@ -50,7 +28,7 @@ export async function GET(request: Request) {
     .map((result) => ({ code: result.error?.code, message: result.error?.message }))
   if (queryErrors.length) {
     console.error('[ADP admin] Dashboard data query failed', { errors: queryErrors })
-    return NextResponse.json({ error: 'Some administration data could not be loaded.' }, { status: 503 })
+    return NextResponse.json({ error: 'admin_data_unavailable' }, { status: 503 })
   }
   const profiles = profilesResult.data ?? []
   return NextResponse.json({
@@ -60,13 +38,12 @@ export async function GET(request: Request) {
     progress: progressResult.data ?? [],
     completions: completionsResult.data ?? [],
     verifiedCompletions: verifiedCompletionsResult.data ?? [],
-    durationSyncResults: syncResults,
-    durationSyncQueryError: pendingError ? 'Unverified videos could not be listed for synchronization.' : null,
     lastActivity: Object.fromEntries(profiles.map((profile) => [profile.id, profile.last_seen_at])),
   })
 }
 
 const schema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('mux-sync'), videoId: z.string().uuid() }),
   z.object({ action: z.literal('access'), discordId: z.string().regex(/^\d{5,25}$/), enabled: z.boolean() }),
   z.object({ action: z.literal('video-create'), title: z.string().min(1).max(180), description: z.string().max(4000).default('') }),
   z.object({ action: z.literal('video-update'), videoId: z.string().uuid(), title: z.string().min(1).max(180), description: z.string().max(4000), thumbnailUrl: z.string().url().nullable().optional(), published: z.boolean(), sortOrder: z.number().int() }),
@@ -78,46 +55,118 @@ const schema = z.discriminatedUnion('action', [
 export async function POST(request: Request) {
   const member = await authorize()
   if (!member) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
-  if (process.env.PLAYBACK_HEARTBEATS_ENABLED !== 'true') return NextResponse.json({ error: 'playback_maintenance' }, { status: 503 })
-  const readinessClient = await createClient()
-  const readiness = await readinessClient.rpc('adp_playback_integrity_version')
-  if (readiness.error || readiness.data !== 121) return NextResponse.json({error:'schema_maintenance'}, {status:503})
   const parsed = schema.safeParse(await request.json().catch(() => null))
-  if (!parsed.success) return NextResponse.json({ error: 'invalid request', details: parsed.error.flatten() }, { status: 400 })
+  if (!parsed.success) return NextResponse.json({ error: 'invalid_request', details: parsed.error.flatten() }, { status: 400 })
   const input = parsed.data
   let result: any = { ok: true }
 
+  if (input.action === 'mux-sync') {
+    // This write path is opt-in separately from both dashboard access and playback.
+    // It stays closed unless an administrator explicitly enables it after approval.
+    if (process.env.MUX_METADATA_SYNC_ENABLED !== 'true') {
+      return NextResponse.json({ error: 'metadata_sync_disabled' }, { status: 503 })
+    }
+    // This service-role readiness RPC is available only while Release 1.2.1
+    // is ready and the database playback gate remains off. Keep it separate
+    // from playback readiness so metadata verification cannot open playback.
+    const readiness = await adminDb.rpc('adp_metadata_sync_integrity_version')
+    if (readiness.error || readiness.data !== 121) return NextResponse.json({ error: 'metadata_sync_unavailable' }, { status: 503 })
+    if (!process.env.MUX_TOKEN_ID || !process.env.MUX_TOKEN_SECRET || !process.env.MUX_SIGNING_KEY_ID || !process.env.MUX_SIGNING_PRIVATE_KEY) {
+      return NextResponse.json({ error: 'mux_credentials_missing' }, { status: 503 })
+    }
+    const { data: video, error: videoError } = await adminDb
+      .from('videos').select('mux_upload_id,duration_precision_verified').eq('id', input.videoId).maybeSingle()
+    if (videoError) {
+      console.error('[ADP admin] Video metadata sync lookup failed', { code: videoError.code, message: videoError.message })
+      return NextResponse.json({ error: 'admin_data_unavailable' }, { status: 503 })
+    }
+    if (!video?.mux_upload_id) return NextResponse.json({ error: 'mux_upload_missing' }, { status: 404 })
+    if (video.duration_precision_verified) return NextResponse.json({ error: 'metadata_already_verified' }, { status: 409 })
+    const { mux } = await import('@/lib/mux')
+    const syncResult = await syncMuxUpload(video.mux_upload_id, { mux, adminDb })
+    if (syncResult.verified) {
+      const { error: auditError } = await adminDb.from('admin_audit_log').insert({
+        admin_id: member.id, action: 'mux-sync', details: { videoId: input.videoId, verified: true },
+      })
+      if (auditError) console.error('[ADP admin] Mux sync audit log write failed', { code: auditError.code, message: auditError.message })
+    }
+    return NextResponse.json(syncResult.verified ? syncResult : { ...syncResult, error: 'mux_sync_failed' }, { status: syncResult.verified ? 200 : 502 })
+  }
+
   if (input.action === 'access') {
-    if (!input.enabled && input.discordId === process.env.INITIAL_ADMIN_DISCORD_ID) return NextResponse.json({ error: 'The bootstrap administrator cannot be removed.' }, { status: 400 })
+    if (!input.enabled && input.discordId === process.env.INITIAL_ADMIN_DISCORD_ID) return NextResponse.json({ error: 'bootstrap_admin_locked' }, { status: 400 })
     if (input.enabled) {
       const { error } = await adminDb.from('authorized_discord_ids').upsert({ discord_id: input.discordId, added_by: member.discord_id }, { onConflict: 'discord_id' })
-      if (error) return NextResponse.json({ error: error.message }, { status: 400 })
+      if (error) {
+        console.error('[ADP admin] Whitelist write failed', { operation: 'add', code: error.code, message: error.message })
+        return NextResponse.json({ error: 'whitelist_write_failed', operation: 'add', databaseCode: error.code || null }, { status: 503 })
+      }
     } else {
       const { error } = await adminDb.from('authorized_discord_ids').delete().eq('discord_id', input.discordId)
-      if (error) return NextResponse.json({ error: error.message }, { status: 400 })
+      if (error) {
+        console.error('[ADP admin] Whitelist write failed', { operation: 'remove', code: error.code, message: error.message })
+        return NextResponse.json({ error: 'whitelist_write_failed', operation: 'remove', databaseCode: error.code || null }, { status: 503 })
+      }
     }
     result.discordId = input.discordId
   }
   if (input.action === 'video-create') {
+    if (!process.env.MUX_TOKEN_ID || !process.env.MUX_TOKEN_SECRET) return NextResponse.json({ error: 'mux_credentials_missing' }, { status: 503 })
+    const { mux } = await import('@/lib/mux')
     const videoId = randomUUID()
-    const upload = await mux.video.uploads.create({ cors_origin: process.env.NEXT_PUBLIC_APP_URL!, new_asset_settings: { playback_policies: ['signed'], video_quality: 'basic', passthrough: videoId } })
+    let upload
+    try {
+      upload = await mux.video.uploads.create({ cors_origin: new URL(request.url).origin, new_asset_settings: { playback_policies: ['signed'], video_quality: 'basic', passthrough: videoId } })
+    } catch (error) {
+      console.error('[ADP admin] Mux upload creation failed', { status: (error as { status?: number })?.status, reason: error instanceof Error ? error.message : 'unknown' })
+      return NextResponse.json({ error: 'mux_upload_creation_failed' }, { status: 502 })
+    }
     const { error } = await adminDb.from('videos').insert({ id: videoId, title: input.title, description: input.description, published: false, sort_order: 999, mux_upload_id: upload.id, duration_seconds: 0 })
-    if (error) return NextResponse.json({ error: error.message }, { status: 400 })
+    if (error) {
+      console.error('[ADP admin] Video record insert failed after Mux upload creation', { code: error.code, message: error.message, uploadId: upload.id })
+      return NextResponse.json({ error: 'video_record_create_failed', databaseCode: error.code || null }, { status: 503 })
+    }
     result = { ok: true, videoId, uploadId: upload.id, uploadUrl: upload.url }
   }
   if (input.action === 'video-update') {
     if (input.published) {
-      const { data: video } = await adminDb.from('videos').select('playback_id,duration_seconds,duration_precision_verified').eq('id', input.videoId).maybeSingle()
-      if (!video?.playback_id || !video.duration_seconds || !video.duration_precision_verified) return NextResponse.json({ error: 'Sync the ready Mux duration before publishing this video.' }, { status: 400 })
+      const { data: video, error: readinessError } = await adminDb.from('videos').select('playback_id,duration_seconds,duration_precision_verified').eq('id', input.videoId).maybeSingle()
+      if (readinessError) {
+        console.error('[ADP admin] Video publish readiness check failed', { code: readinessError.code, message: readinessError.message })
+        return NextResponse.json({ error: 'video_publish_check_failed', databaseCode: readinessError.code || null }, { status: 503 })
+      }
+      if (!video) return NextResponse.json({ error: 'video_not_found' }, { status: 404 })
+      if (!video.playback_id || !Number(video.duration_seconds) || !video.duration_precision_verified) {
+        return NextResponse.json({ error: 'video_metadata_unverified' }, { status: 409 })
+      }
     }
     const { error } = await adminDb.from('videos').update({ title: input.title, description: input.description, thumbnail_url: input.thumbnailUrl, published: input.published, sort_order: input.sortOrder }).eq('id', input.videoId)
-    if (error) return NextResponse.json({ error: error.message }, { status: 400 })
+    if (error) {
+      console.error('[ADP admin] Video record update failed', { code: error.code, message: error.message })
+      return NextResponse.json({ error: 'video_record_update_failed', databaseCode: error.code || null }, { status: 503 })
+    }
   }
   if (input.action === 'video-delete') {
-    const { data: video } = await adminDb.from('videos').select('asset_id').eq('id', input.videoId).maybeSingle()
-    if (video?.asset_id) await mux.video.assets.delete(video.asset_id)
+    const { data: video, error: lookupError } = await adminDb.from('videos').select('asset_id').eq('id', input.videoId).maybeSingle()
+    if (lookupError) {
+      console.error('[ADP admin] Video record lookup before delete failed', { code: lookupError.code, message: lookupError.message })
+      return NextResponse.json({ error: 'video_record_unavailable', databaseCode: lookupError.code || null }, { status: 503 })
+    }
+    if (video?.asset_id) {
+      if (!process.env.MUX_TOKEN_ID || !process.env.MUX_TOKEN_SECRET) return NextResponse.json({ error: 'mux_credentials_missing' }, { status: 503 })
+      const { mux } = await import('@/lib/mux')
+      try {
+        await mux.video.assets.delete(video.asset_id)
+      } catch (error) {
+        console.error('[ADP admin] Mux asset deletion failed', { reason: error instanceof Error ? error.message : 'unknown' })
+        return NextResponse.json({ error: 'mux_asset_delete_failed' }, { status: 502 })
+      }
+    }
     const { error } = await adminDb.from('videos').delete().eq('id', input.videoId)
-    if (error) return NextResponse.json({ error: error.message }, { status: 400 })
+    if (error) {
+      console.error('[ADP admin] Video record delete failed', { code: error.code, message: error.message })
+      return NextResponse.json({ error: video?.asset_id ? 'video_record_delete_failed_after_mux_asset_delete' : 'video_record_delete_failed', databaseCode: error.code || null }, { status: 503 })
+    }
   }
   if (input.action === 'progress-reset' || input.action === 'progress-complete') {
     const client = await createClient()

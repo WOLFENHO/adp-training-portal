@@ -4,25 +4,23 @@
 <video id="media" playsinline></video>
 <pre id="result">RUNNING</pre>
 <script type="module">
-import { bindPauseBufferEvents, requiresServerPlayActivation, transitionRecoveryKind } from '/player-lifecycle.mjs'
+import { bindPauseBufferEvents, transitionRecoveryKind } from '/player-lifecycle.mjs'
 const result = document.querySelector('#result')
 const assert = (condition, label) => { if (!condition) throw new Error(label) }
 try {
   const media = document.querySelector('#media')
   const events = []
   let serverPlaying = true
-  let pausePending = false
   let confirmedPosition = 12.345
   let acceptedPosition = confirmedPosition
   const unbind = bindPauseBufferEvents(media, {
-    onPause: (kind, position) => { pausePending = true; events.push({ kind, position }) },
-    onBuffering: (kind, position) => { pausePending = true; events.push({ kind, position }) },
+    onPause: (kind, position) => { events.push({ kind, position }) },
+    onBuffering: (kind, position) => { events.push({ kind, position }) },
   })
   media.dispatchEvent(new Event('pause'))
   media.dispatchEvent(new Event('waiting'))
   assert(events[0].kind === 'pause', 'pause mapping')
   assert(events[1].kind === 'buffering', 'waiting mapping')
-  assert(requiresServerPlayActivation(serverPlaying, pausePending), 'resume waits for server transition')
 
   for (const kind of ['pause', 'buffering']) {
     const rejectedPosition = 48.75
@@ -33,17 +31,12 @@ try {
     // Mimic an accepted recovery receipt from the server.
     acceptedPosition = recoveryRequest.position
     serverPlaying = false
-    pausePending = false
     assert(acceptedPosition === confirmedPosition, `${kind} recovery does not promote rejected position`)
-    assert(requiresServerPlayActivation(serverPlaying, pausePending), 'resume must create a fresh accepted play transition')
-    // Resume activation is only allowed after the server accepts `play`.
     serverPlaying = true
-    assert(!requiresServerPlayActivation(serverPlaying, false), 'accepted resume may continue')
     serverPlaying = true
-    pausePending = true
   }
   unbind()
-  result.textContent = 'PASS: native pause/waiting mapping, rejected pause/buffering recovery, confirmed-position rollback, and resume gating'
+  result.textContent = 'PASS: native pause/waiting mapping, rejected pause/buffering recovery, confirmed-position rollback'
   document.documentElement.dataset.test = 'pass'
 } catch (error) {
   result.textContent = `FAIL: ${error instanceof Error ? error.message : error}`

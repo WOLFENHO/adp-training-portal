@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { bindPauseBufferEvents, requiresServerPlayActivation, transitionRecoveryKind } from '../../src/lib/player-lifecycle.mjs'
+import { bindPauseBufferEvents, transitionRecoveryKind } from '../../src/lib/player-lifecycle.mjs'
 import { summarizeVideoProgress } from '../../src/lib/progress-status.mjs'
 
 test('native pause maps to pause and waiting maps to buffering', () => {
@@ -22,7 +22,7 @@ test('native pause maps to pause and waiting maps to buffering', () => {
   ])
 })
 
-test('rejected stop transitions recover only from confirmed media time and gate resume', () => {
+test('rejected stop transitions recover only from confirmed media time', () => {
   const confirmedPosition = 17.125
   const rejectedPosition = 29.75
   for (const kind of ['pause', 'buffering']) {
@@ -30,11 +30,8 @@ test('rejected stop transitions recover only from confirmed media time and gate 
     assert.equal(recoveryKind, kind)
     const request = { kind: recoveryKind, position: confirmedPosition, isPlaying: false }
     assert.notEqual(request.position, rejectedPosition)
-    assert.equal(requiresServerPlayActivation(true, true), true)
     assert.equal(transitionRecoveryKind(kind, true, true, false), null)
     assert.equal(transitionRecoveryKind(kind, false, true, true), null)
-    assert.equal(requiresServerPlayActivation(false, false), true)
-    assert.equal(requiresServerPlayActivation(true, false), false)
   }
 })
 

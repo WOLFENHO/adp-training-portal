@@ -11,4 +11,3 @@ export function transitionRecoveryKind(
   eventGeneration?: number,
   currentGeneration?: number,
 ): StopKind | null
-export function requiresServerPlayActivation(serverPlaying: boolean, stopTransitionPending: boolean): boolean

@@ -17,8 +17,3 @@ export function transitionRecoveryKind(kind, accepted, serverPlaying, alreadyAtt
   if (kind === 'pause' || kind === 'buffering') return kind
   return null
 }
-
-/** Resume only after the server has accepted the active-playback transition. */
-export function requiresServerPlayActivation(serverPlaying, stopTransitionPending) {
-  return !serverPlaying || stopTransitionPending
-}
