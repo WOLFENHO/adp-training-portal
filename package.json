@@ -1,0 +1,40 @@
+{
+  "name": "adp-private-training-portal",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "node scripts/build.mjs",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test:duration-sync": "node --test supabase/tests/mux_duration_sync.test.mjs",
+    "test:player-lifecycle": "node --test supabase/tests/player_lifecycle.test.mjs",
+    "test:progress-concurrency": "python supabase/tests/progress_integrity_concurrency.py",
+    "serve:player-lifecycle:browser": "node supabase/tests/player_lifecycle_browser_server.mjs",
+    "test:maintenance": "node --test supabase/tests/maintenance_routes.test.mjs",
+    "test:release-concurrency": "node supabase/tests/release_1_2_1_concurrency.mjs",
+    "test:heartbeat-response": "node --test supabase/tests/heartbeat_response.test.mjs",
+    "test": "node --test supabase/tests/player_lifecycle.test.mjs supabase/tests/mux_duration_sync.test.mjs supabase/tests/maintenance_routes.test.mjs supabase/tests/heartbeat_response.test.mjs supabase/tests/sql_delimiters.test.mjs src/lib/maintenance-messages.test.mjs"
+  },
+  "dependencies": {
+    "@mux/mux-player-react": "^3.14.1",
+    "@mux/ts": "^16.0.0",
+    "@supabase/ssr": "^0.6.1",
+    "@supabase/supabase-js": "^2.57.0",
+    "next": "^15.5.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.0",
+    "@types/node": "^22.18.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "tailwindcss": "^4.1.0",
+    "typescript": "^5.9.0"
+  },
+  "overrides": {
+    "postcss": "^8.5.32"
+  }
+}
