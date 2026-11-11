@@ -1,0 +1,27 @@
+.preview {
+  font-family: Arial, sans-serif;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.logo {
+  height: auto;
+  flex-shrink: 0;
+}
+
+.heading {
+  margin-bottom: 24px;
+}
+
+.preview h1,
+.preview h2 {
+  letter-spacing: normal;
+  text-transform: uppercase;
+}
