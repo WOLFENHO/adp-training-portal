@@ -7,7 +7,8 @@ const result = (ok, code) => ({ expectedProjectRef: REHEARSAL_REF, ok, code })
 export function checkProbeAccess(env, presented) {
   const until = Date.parse(env.ADP_QC_PROBE_UNTIL ?? '')
   const token = env.ADP_QC_PROBE_TOKEN
-  if (env.VERCEL_ENV !== 'preview' || env.ADP_QC_PROBE_ENABLED !== 'true' || !Number.isFinite(until) || Date.now() >= until ||
+  if (env.VERCEL_ENV !== 'preview' || env.ADP_QC_PROBE_ENABLED !== 'true' || !Number.isFinite(until) ||
+      Date.now() >= until || until > Date.now() + 15 * 60_000 ||
       !token || token.length < 24 || !presented) return result(false, 'ADP-QC014-DISABLED')
   const expected = Buffer.from(token)
   const actual = Buffer.from(presented)
