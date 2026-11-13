@@ -5,17 +5,22 @@ import { Header } from '@/components/shell'
 import type { Video } from '@/lib/types'
 import { thumbnailToken } from '@/lib/mux'
 import { summarizeVideoProgress } from '@/lib/progress-status.mjs'
+import { requiredQuery } from '@/lib/required-query.mjs'
 
 export const dynamic = 'force-dynamic'
 
 export default async function Library() {
   const member = await requireMember()
-  const [{ data: videos }, { data: rows }, { data: history }, { data: verified }] = await Promise.all([
+  const [videosResult, rowsResult, historyResult, verifiedResult] = await Promise.all([
     adminDb.from('videos').select('*').eq('published', true).order('sort_order'),
     adminDb.from('user_video_progress').select('video_id,verified_watched_seconds,completed_at').eq('user_id', member.id),
     adminDb.from('completion_records').select('video_id,completed_at,method').eq('user_id', member.id),
     adminDb.from('verified_completion_records').select('video_id,asset_id,duration_seconds,completed_at,validator_version,asset_identity,reset_at,verified_at').eq('user_id', member.id),
   ])
+  const videos = requiredQuery(videosResult, 'videos')
+  const rows = requiredQuery(rowsResult, 'progress')
+  const history = requiredQuery(historyResult, 'history')
+  const verified = requiredQuery(verifiedResult, 'verified')
   const progress = new Map((rows ?? []).map((row: any) => [row.video_id, row]))
   const thumbnailTokens = new Map(await Promise.all((videos ?? []).filter((video) => video.playback_id)
     .map(async (video) => [video.id, await thumbnailToken(video.playback_id!, video.duration_seconds)] as const)))

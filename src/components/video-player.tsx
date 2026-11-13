@@ -168,17 +168,6 @@ export function VideoPlayer({
       scheduledAt,
     }
     if (kind === 'periodic') periodicPending.current = true
-    console.info('[ADP playback] heartbeat scheduled', {
-      requestId: request.requestId,
-      clientSequence: request.clientSequence,
-      kind,
-      scheduledAt,
-      requestedPosition: pos,
-      isPlaying,
-      mediaTime: ref.current?.currentTime,
-      paused: ref.current?.paused,
-      playbackActive: playbackActive.current,
-    })
 
     heartbeatQueue.current = heartbeatQueue.current.then(async () => {
       if (!session.current) {
@@ -196,19 +185,7 @@ export function VideoPlayer({
           item.isPlaying = serverPlaying.current
         }
         item.expectedVersion ??= sessionVersion.current
-        const sentAt = new Date().toISOString()
-        console.info('[ADP playback] heartbeat sent', {
-          requestId: item.requestId,
-          clientSequence: item.clientSequence,
-          expectedVersion: item.expectedVersion,
-          kind: item.kind,
-          scheduledAt: item.scheduledAt,
-          sentAt,
-          requestedPosition: item.position,
-          isPlaying: item.isPlaying,
-          mediaTime: ref.current?.currentTime,
-          paused: ref.current?.paused,
-        })
+
         try {
           const response = await fetch('/api/videos/heartbeat', {
             method: 'POST',
@@ -223,34 +200,9 @@ export function VideoPlayer({
               kind: item.kind,
             }),
           })
-          const { contentType, rawBody, data } = await readHeartbeatResponse(response)
-          const responseAt = new Date().toISOString()
+          const { data } = await readHeartbeatResponse(response)
           if (!response.ok || !data.accepted) {
-            console.error('[ADP playback] heartbeat rejected', {
-              requestId: item.requestId,
-              clientSequence: item.clientSequence,
-              expectedVersion: item.expectedVersion,
-              kind: item.kind,
-              status: response.status,
-              contentType,
-              rawBody,
-              code: data.code,
-              reason: data.error || data.reason,
-              sessionVersion: data.version,
-              acceptedPosition: data.acceptedPosition,
-              serverIsPlaying: data.serverIsPlaying,
-              serverElapsed: data.serverElapsed,
-              transactionStartedAt: data.transactionStartedAt,
-              databaseRequestAt: data.requestAt,
-              previousHeartbeatAt: data.previousHeartbeatAt,
-              previousPosition: data.acceptedPosition,
-              eligibleBudget: data.eligibleBudget,
-              allowedAdvance: data.allowedAdvance,
-              actualAdvance: data.actualAdvance,
-              scheduledAt: item.scheduledAt,
-              sentAt,
-              responseAt,
-            })
+
             if (Number.isInteger(data.version)) sessionVersion.current = data.version
             if (Number.isSafeInteger(data.currentLastEventSequence ?? data.lastEventSequence)) {
               requestSequence.current = Math.max(requestSequence.current, data.currentLastEventSequence ?? data.lastEventSequence)
@@ -319,27 +271,7 @@ export function VideoPlayer({
             intervals.current = data.intervals ?? intervals.current
             setConfirmed(data.percent ?? 0)
           }
-          console.info('[ADP playback] heartbeat accepted', {
-            requestId: item.requestId,
-            clientSequence: item.clientSequence,
-            version: data.version,
-            kind: item.kind,
-            scheduledAt: item.scheduledAt,
-            sentAt,
-            responseAt,
-            databaseRequestAt: data.requestAt,
-            previousHeartbeatAt: data.previousHeartbeatAt,
-            previousPosition: data.previousPosition,
-            acceptedPosition: data.acceptedPosition,
-            serverElapsed: data.serverElapsed,
-            budgetSeconds: data.budgetSeconds,
-              lastEventSequence: data.lastEventSequence,
-            intervalInserted: data.intervalInserted,
-            intervalCount: data.intervals?.length,
-            percent: data.percent,
-            duplicate: data.duplicate,
-            serverIsPlaying: data.serverIsPlaying,
-          })
+
           if (data.complete && (!data.duplicate || (data.currentVersion ?? data.version) === data.version)) setMessage('Training complete.')
           if (item.kind === 'play' && activationRequestId.current === item.requestId) {
             activationRequestId.current = null
@@ -362,15 +294,7 @@ export function VideoPlayer({
           }
           return 'accepted'
         } catch (error) {
-          console.error('[ADP playback] heartbeat network failure', {
-            requestId: item.requestId,
-            clientSequence: item.clientSequence,
-            expectedVersion: item.expectedVersion,
-            kind: item.kind,
-            scheduledAt: item.scheduledAt,
-            sentAt,
-            error: String(error),
-          })
+
           setMessage('Network interruption: progress is not confirmed. The same request will retry before newer progress.')
           return 'network-error'
         }

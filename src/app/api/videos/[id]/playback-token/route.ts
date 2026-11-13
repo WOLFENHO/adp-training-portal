@@ -3,6 +3,7 @@ import { getMember } from '@/lib/auth'
 import { adminDb } from '@/lib/supabase/admin'
 import { playbackToken } from '@/lib/mux'
 import { getPlaybackGate } from '@/lib/playback-gate'
+import { z } from 'zod'
 
 export async function GET(_: Request, { params }: { params: Promise<{ id: string }> }) {
   const member = await getMember()
@@ -17,9 +18,10 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
   }
 
   const { id } = await params
+  if (!z.string().uuid().safeParse(id).success) return NextResponse.json({ error: 'invalid_request' }, { status: 400, headers: { 'Cache-Control': 'private, no-store, max-age=0' } })
   const { data: video, error } = await adminDb
     .from('videos')
-    .select('playback_id,published')
+    .select('playback_id,published,duration_seconds')
     .eq('id', id)
     .maybeSingle()
   if (error) {
@@ -30,5 +32,9 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
     return NextResponse.json({ error: 'not_found' }, { status: 404 })
   }
 
-  return NextResponse.json({ token: await playbackToken(video.playback_id) })
+  try {
+    return NextResponse.json({ token: await playbackToken(video.playback_id, video.duration_seconds) }, { headers: { 'Cache-Control': 'private, no-store, max-age=0' } })
+  } catch {
+    return NextResponse.json({ error: 'playback_signing_unavailable' }, { status: 503, headers: { 'Cache-Control': 'private, no-store, max-age=0' } })
+  }
 }

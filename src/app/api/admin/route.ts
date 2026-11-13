@@ -140,33 +140,17 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: 'video_metadata_unverified' }, { status: 409 })
       }
     }
-    const { error } = await adminDb.from('videos').update({ title: input.title, description: input.description, thumbnail_url: input.thumbnailUrl, published: input.published, sort_order: input.sortOrder }).eq('id', input.videoId)
+    const { data: updatedVideo, error } = await adminDb.from('videos').update({ title: input.title, description: input.description, thumbnail_url: input.thumbnailUrl, published: input.published, sort_order: input.sortOrder }).eq('id', input.videoId).select('id').maybeSingle()
     if (error) {
       console.error('[ADP admin] Video record update failed', { code: error.code, message: error.message })
       return NextResponse.json({ error: 'video_record_update_failed', databaseCode: error.code || null }, { status: 503 })
     }
+    if (!updatedVideo) return NextResponse.json({ error: 'video_not_found' }, { status: 404 })
   }
   if (input.action === 'video-delete') {
-    const { data: video, error: lookupError } = await adminDb.from('videos').select('asset_id').eq('id', input.videoId).maybeSingle()
-    if (lookupError) {
-      console.error('[ADP admin] Video record lookup before delete failed', { code: lookupError.code, message: lookupError.message })
-      return NextResponse.json({ error: 'video_record_unavailable', databaseCode: lookupError.code || null }, { status: 503 })
-    }
-    if (video?.asset_id) {
-      if (!process.env.MUX_TOKEN_ID || !process.env.MUX_TOKEN_SECRET) return NextResponse.json({ error: 'mux_credentials_missing' }, { status: 503 })
-      const { mux } = await import('@/lib/mux')
-      try {
-        await mux.video.assets.delete(video.asset_id)
-      } catch (error) {
-        console.error('[ADP admin] Mux asset deletion failed', { reason: error instanceof Error ? error.message : 'unknown' })
-        return NextResponse.json({ error: 'mux_asset_delete_failed' }, { status: 502 })
-      }
-    }
-    const { error } = await adminDb.from('videos').delete().eq('id', input.videoId)
-    if (error) {
-      console.error('[ADP admin] Video record delete failed', { code: error.code, message: error.message })
-      return NextResponse.json({ error: video?.asset_id ? 'video_record_delete_failed_after_mux_asset_delete' : 'video_record_delete_failed', databaseCode: error.code || null }, { status: 503 })
-    }
+    // A provider delete cannot participate in the database transaction, and
+    // deleting the video cascades into training evidence. Use unpublish for now.
+    return NextResponse.json({ error: 'video_delete_disabled', reason: 'Unpublish this video to retain training history.' }, { status: 409 })
   }
   if (input.action === 'progress-reset' || input.action === 'progress-complete') {
     const client = await createClient()

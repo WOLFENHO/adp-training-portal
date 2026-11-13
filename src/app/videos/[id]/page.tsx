@@ -7,20 +7,25 @@ import { VideoPlayer } from '@/components/video-player'
 import { playbackToken } from '@/lib/mux'
 import { getPlaybackGate } from '@/lib/playback-gate'
 import { summarizeVideoProgress } from '@/lib/progress-status.mjs'
+import { requiredQuery } from '@/lib/required-query.mjs'
 
 export const dynamic = 'force-dynamic'
 
 export default async function Watch({params}:{params:Promise<{id:string}>}) {
   const { id } = await params
   const member = await requireMember()
-  const { data: video } = await adminDb.from('videos').select('*').eq('id',id).eq('published',true).maybeSingle()
+  const video = requiredQuery(await adminDb.from('videos').select('*').eq('id',id).eq('published',true).maybeSingle(), 'video')
   if (!video) notFound()
-  const [{ data: progress }, { data: intervals }, { data: history }, { data: verified }] = await Promise.all([
+  const [progressResult, intervalsResult, historyResult, verifiedResult] = await Promise.all([
     adminDb.from('user_video_progress').select('verified_watched_seconds,completed_at').eq('video_id',id).eq('user_id',member.id).maybeSingle(),
     adminDb.from('watched_intervals').select('start_seconds,end_seconds,verification_source,completion_eligible,completion_end_seconds').eq('video_id',id).eq('user_id',member.id).eq('verification_source','release_1_2').is('reset_at',null).eq('asset_identity',`${video.asset_id}:${Number(video.duration_seconds).toFixed(3)}:12`),
     adminDb.from('completion_records').select('completed_at,method').eq('video_id',id).eq('user_id',member.id),
     adminDb.from('verified_completion_records').select('asset_id,duration_seconds,completed_at,validator_version,asset_identity,reset_at,verified_at').eq('video_id',id).eq('user_id',member.id),
   ])
+  const progress = requiredQuery(progressResult, 'progress')
+  const intervals = requiredQuery(intervalsResult, 'intervals')
+  const history = requiredQuery(historyResult, 'history')
+  const verified = requiredQuery(verifiedResult, 'verified')
   const visibleIntervals = (intervals ?? [])
     .filter((row) => !video.duration_precision_verified || row.completion_eligible)
     .map((row) => ({start_seconds:row.start_seconds,end_seconds:video.duration_precision_verified?row.completion_end_seconds:row.end_seconds}))
