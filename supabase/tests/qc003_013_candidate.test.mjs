@@ -23,6 +23,23 @@ test('QC-013 candidate authorizes current admin and writes audit in the same tra
   assert.match(sql, /public\.is_administrator\(\)/)
   assert.match(sql, /for update/)
   assert.match(sql, /admin_audit_log/)
+  assert.match(sql, /for key share of a,r/)
+  assert.match(sql, /^begin;[\s\S]*commit;\s*$/m)
   assert.match(sql, /revoke all on function[\s\S]*authenticated/)
   assert.doesNotMatch(sql, /grant execute/)
+})
+
+test('QC-003/013 executable rehearsals require isolated marker and rollback', () => {
+  for (const path of ['supabase/batch2/qc003_gap_rehearsal.sql', 'supabase/batch2/qc013_role_matrix_rehearsal.sql']) {
+    const sql = fs.readFileSync(path, 'utf8')
+    assert.match(sql, /adp\.qc_isolated/)
+    assert.match(sql, /^begin;/m)
+    assert.match(sql, /rollback;\s*$/)
+  }
+  const gap = fs.readFileSync('supabase/batch2/qc003_gap_rehearsal.sql', 'utf8')
+  assert.match(gap, /heartbeat_gap_exceeded/)
+  assert.match(gap, /watched_intervals/)
+  assert.match(gap, /19\.5 seconds/)
+  const role = fs.readFileSync('supabase/batch2/qc013_role_matrix_rehearsal.sql', 'utf8')
+  for (const caseName of ['valid admin', 'revoked admin', 'member accepted', 'anonymous execution', 'audit failure']) assert.match(role, new RegExp(caseName))
 })

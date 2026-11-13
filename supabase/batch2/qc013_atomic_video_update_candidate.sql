@@ -1,4 +1,5 @@
 -- ISOLATED CANDIDATE ONLY. No EXECUTE grant. Compare deployed schema first.
+begin;
 create or replace function public.adp_admin_update_video_qc013(
   p_video_id uuid, p_title text, p_description text,
   p_thumbnail_url text, p_published boolean, p_sort_order integer
@@ -9,8 +10,16 @@ begin
   if actor is null or not public.is_authorized() or not public.is_administrator() then
     raise exception using errcode='42501',message='not authorized';
   end if;
+  -- Serialize a concurrent whitelist/role revocation with this mutation.
+  perform 1 from public.profiles p
+    join public.authorized_discord_ids a on a.discord_id=p.discord_id
+    join public.administrator_roles r on r.discord_id=p.discord_id
+    where p.id=actor for key share of a,r;
+  if not found then raise exception using errcode='42501',message='not authorized'; end if;
   if p_video_id is null or p_title is null or length(trim(p_title)) not between 1 and 180 or
      p_description is null or length(p_description)>4000 or
+     (p_thumbnail_url is not null and (length(p_thumbnail_url)>2048 or
+       p_thumbnail_url !~* '^https?://')) or
      p_published is null or p_sort_order is null then
     raise exception using errcode='22023',message='invalid video update';
   end if;
@@ -29,3 +38,4 @@ begin
 end $$;
 revoke all on function public.adp_admin_update_video_qc013(uuid,text,text,text,boolean,integer)
   from public,anon,authenticated;
+commit;
