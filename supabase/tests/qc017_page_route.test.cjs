@@ -9,7 +9,7 @@ function route(member, page) {
   const source = ts.transpileModule(fs.readFileSync('src/app/api/admin/page/route.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
   const exports = {}
   new Function('require', 'exports', source)((id) => ({
-    '@/lib/auth': { getMember: async () => member },
+    '@/lib/auth': { getMember: async () => { if (member instanceof Error) throw member; return member } },
     '@/lib/supabase/admin': { adminDb: {} },
     '@/lib/admin-keyset.mjs': { pageAdminRows: page },
   })[id] ?? appRequire(id), exports)
@@ -24,4 +24,13 @@ test('QC-017 page route checks authorization and parameters before privileged re
   const response = await admin.GET(new Request('http://localhost/api/admin/page?view=videos&limit=50'))
   assert.equal(response.status, 200)
   assert.match(response.headers.get('Cache-Control') ?? '', /no-store/)
+})
+
+test('QC-018 paged admin authorization outage is a redacted service error', async () => {
+  const page = route(new Error('sensitive database detail'), () => { throw Error('query reached') })
+  const response = await page.GET(new Request('http://localhost/api/admin/page?view=videos'))
+  assert.equal(response.status, 503)
+  const text = await response.text()
+  assert.doesNotMatch(text, /sensitive database detail/)
+  assert.match(text, /correlationId/)
 })

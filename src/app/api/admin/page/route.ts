@@ -11,7 +11,11 @@ const querySchema = z.object({ view: z.enum(['videos', 'profiles', 'progress']),
 export async function GET(request: Request) {
   const correlationId = randomUUID()
   const fail = (status: number, error: string) => NextResponse.json({ error, errorId: error === 'forbidden' ? 'ADP-AUTH-003' : 'ADP-ADM-002', correlationId }, { status, headers })
-  const member = await getMember()
+  let member
+  try { member = await getMember() } catch {
+    console.error('[ADP admin] paged authorization unavailable', { correlationId, errorId: 'ADP-ADM-002' })
+    return fail(503, 'admin_data_unavailable')
+  }
   if (!member?.is_admin) return fail(403, 'forbidden')
   const url = new URL(request.url)
   const parsed = querySchema.safeParse({ view: url.searchParams.get('view'), limit: url.searchParams.get('limit') ?? 50, cursor: url.searchParams.get('cursor') })
