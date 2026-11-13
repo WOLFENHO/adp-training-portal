@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { fetchWithDeadline, createReceiptRetry } from '../../src/lib/playback-recovery.mjs'
+import { fetchWithDeadline, createReceiptRetry, createReceiptBarrier } from '../../src/lib/playback-recovery.mjs'
 
 test('QC-009 a hung heartbeat is aborted after a bounded deadline', async () => {
   let aborted = false
@@ -45,4 +45,37 @@ test('QC-009 retries stop after disposal or permanent rejection', async () => {
   closed.dispose()
   await closed.retryNow()
   assert.equal(calls, 1)
+})
+
+test('QC-009 later pause and completion wait through repeated lost receipts', async () => {
+  const seen = []
+  const media = { paused: false, pause() { this.paused = true } }
+  const receipt = Object.freeze({ requestId: 'play-1', expectedVersion: 0, clientSequence: 1, kind: 'play' })
+  const barrier = createReceiptBarrier()
+  barrier.hold(receipt)
+  media.pause()
+  const later = barrier.wait().then(() => { seen.push('pause-2', 'complete-3') })
+  let retryCount = 0
+  const retry = createReceiptRetry({
+    attempt: async (item) => { seen.push(item); return ++retryCount < 3 ? 'network-error' : 'accepted' },
+    schedule: () => 1,
+    cancel: () => {},
+  })
+  retry.remember(receipt)
+  await retry.retryNow()
+  await retry.retryNow()
+  assert.equal(media.paused, true)
+  assert.deepEqual(seen, [receipt, receipt])
+  await retry.retryNow()
+  barrier.settle(receipt)
+  await later
+  assert.deepEqual(seen, [receipt, receipt, receipt, 'pause-2', 'complete-3'])
+})
+
+test('QC-009 unmount releases waiting operations and discards retry', async () => {
+  const barrier = createReceiptBarrier()
+  barrier.hold({ requestId: 'complete' })
+  const wait = barrier.wait()
+  barrier.dispose()
+  assert.equal(await wait, false)
 })

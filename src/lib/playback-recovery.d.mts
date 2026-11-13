@@ -12,3 +12,10 @@ export function createReceiptRetry<T>(options: {
   schedule?: (callback: () => void, milliseconds: number) => ReturnType<typeof setTimeout>
   cancel?: (timer: ReturnType<typeof setTimeout>) => void
 }): ReceiptRetry<T>
+export interface ReceiptBarrier<T> {
+  hold(item: T): void
+  wait(): Promise<boolean>
+  settle(item: T): void
+  dispose(): void
+}
+export function createReceiptBarrier<T>(): ReceiptBarrier<T>

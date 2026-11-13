@@ -16,3 +16,7 @@ export function intervalMarkers(intervals, duration) {
       : []
   })
 }
+
+export function shouldHideControls(playing, focusWithin) {
+  return Boolean(playing && !focusWithin)
+}

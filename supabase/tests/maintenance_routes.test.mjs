@@ -11,6 +11,7 @@ function route(file,ready){
  id==='@/lib/supabase/server'?{createClient:async()=>({rpc:async(name)=>{calls.push(name);return {data:ready,error:null}}})}:
  id==='@/lib/supabase/admin'?{adminDb:forbidden}:id==='@/lib/mux'?{mux:forbidden,playbackToken:()=>{throw Error('Unexpected playback token during maintenance')}}:
  id==='@/lib/playback-gate'?evaluate('src/lib/playback-gate.ts'):
+ id==='@/lib/api-errors.mjs'?{sameOriginMutation:()=>true,safeSessionRpcError:()=>({status:503,code:'session_unavailable',errorId:'ADP-PRG-004'})}:
  id==='@/lib/mux-duration-sync.mjs'?{syncMuxUpload:()=>{throw Error('Unexpected Mux sync')}}:
  id==='@/lib/admin-pages.mjs'?{collectPages:()=>{throw Error('Unexpected dashboard read')}}:require(id)
  function evaluate(path) {

@@ -5,7 +5,7 @@ import { getMember } from '@/lib/auth'
 import { adminDb } from '@/lib/supabase/admin'
 import { randomUUID } from 'crypto'
 import { syncMuxUpload } from '@/lib/mux-duration-sync.mjs'
-import { collectPages } from '@/lib/admin-pages.mjs'
+import { assertDashboardSize, collectPages } from '@/lib/admin-pages.mjs'
 
 async function authorize() {
   const member = await getMember()
@@ -26,6 +26,7 @@ export async function GET() {
       collectPages(async (from, to) => await adminDb.from('completion_records').select('user_id,video_id,completed_at,method', { count: 'exact' }).order('user_id').order('video_id').range(from, to)),
       collectPages(async (from, to) => await adminDb.from('verified_completion_records').select('user_id,video_id,asset_id,duration_seconds,completed_at,validator_version,asset_identity,reset_at,verified_at', { count: 'exact' }).order('user_id').order('video_id').order('asset_id').order('duration_seconds').range(from, to)),
     ])
+    assertDashboardSize(profiles.length, videos.length)
   } catch {
     console.error('[ADP admin] Dashboard pagination or data query failed')
     return NextResponse.json({ error: 'admin_data_unavailable' }, { status: 503, headers: { 'Cache-Control': 'private, no-store, max-age=0' } })

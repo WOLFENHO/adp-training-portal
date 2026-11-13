@@ -6,8 +6,8 @@ import { useRouter } from 'next/navigation'
 import { readHeartbeatResponse } from '@/lib/heartbeat-response.mjs'
 import { bindPauseBufferEvents, transitionRecoveryKind } from '@/lib/player-lifecycle.mjs'
 import { playbackSessionMessage } from '@/lib/maintenance-messages.mjs'
-import { createReceiptRetry, fetchWithDeadline, type ReceiptRetry, type RetryOutcome } from '@/lib/playback-recovery.mjs'
-import { visibleVerifiedPercent, intervalMarkers } from '@/lib/player-display.mjs'
+import { createReceiptBarrier, createReceiptRetry, fetchWithDeadline, type ReceiptBarrier, type ReceiptRetry, type RetryOutcome } from '@/lib/playback-recovery.mjs'
+import { visibleVerifiedPercent, intervalMarkers, shouldHideControls } from '@/lib/player-display.mjs'
 
 type HeartbeatKind = 'play' | 'pause' | 'buffering' | 'periodic' | 'seek' | 'complete'
 type Heartbeat = {
@@ -72,6 +72,8 @@ export function VideoPlayer({
   const sessionRequest = useRef<{ videoId: string; response: Promise<{ response: Response; data: any }> } | null>(null)
   const retryPending = useRef<((item: Heartbeat) => Promise<RetryOutcome>) | null>(null)
   const receiptRetry = useRef<ReceiptRetry<Heartbeat> | null>(null)
+  const receiptBarrier = useRef<ReceiptBarrier<Heartbeat> | null>(null)
+  const mounted = useRef(false)
   const sessionVersion = useRef(0)
   const resumeAt = useRef(0)
   const lastHeartbeat = useRef(0)
@@ -84,6 +86,7 @@ export function VideoPlayer({
   const endedAt = useRef<number | null>(null)
   const heartbeatQueue = useRef<Promise<void>>(Promise.resolve())
   const hiddenTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const controlsFocused = useRef(false)
   const playbackActive = useRef(false)
   const serverPlaying = useRef(false)
   const pauseRecoveryAttempted = useRef(false)
@@ -113,6 +116,9 @@ export function VideoPlayer({
   const metadata = useMemo(() => ({ video_id: videoId }), [videoId])
 
   useEffect(() => {
+    mounted.current = true
+    const barrier = createReceiptBarrier<Heartbeat>()
+    receiptBarrier.current = barrier
     const controller = createReceiptRetry<Heartbeat>({
       attempt: (item) => retryPending.current?.(item) ?? Promise.resolve('network-error'),
     })
@@ -120,9 +126,12 @@ export function VideoPlayer({
     const online = () => { void controller.retryNow() }
     window.addEventListener('online', online)
     return () => {
+      mounted.current = false
       window.removeEventListener('online', online)
       controller.dispose()
+      barrier.dispose()
       if (receiptRetry.current === controller) receiptRetry.current = null
+      if (receiptBarrier.current === barrier) receiptBarrier.current = null
     }
   }, [])
 
@@ -201,6 +210,10 @@ export function VideoPlayer({
     if (kind === 'periodic') periodicPending.current = true
 
     heartbeatQueue.current = heartbeatQueue.current.then(async () => {
+      if (!mounted.current) return
+      // An unknown receipt must be reconciled before a newer user intent.
+      const barrier = receiptBarrier.current
+      if (barrier && !(await barrier.wait())) return
       if (!session.current) {
         if (kind === 'periodic') periodicPending.current = false
         return
@@ -234,6 +247,7 @@ export function VideoPlayer({
               kind: item.kind,
             }),
           })
+          if (!mounted.current) return 'network-error'
           if (!response.ok || !data.accepted) {
             if (Number.isInteger(data.version)) sessionVersion.current = data.version
             if (Number.isSafeInteger(data.currentLastEventSequence ?? data.lastEventSequence)) {
@@ -333,6 +347,7 @@ export function VideoPlayer({
           }
           return 'accepted'
         } catch {
+          if (!mounted.current) return 'network-error'
           if (item.isPlaying && ref.current && !ref.current.paused) {
             suppressPauseEvent.current = true
             ref.current.pause()
@@ -348,56 +363,30 @@ export function VideoPlayer({
         }
       }
 
-      retryPending.current = (item) => new Promise<RetryOutcome>((resolve) => {
-        heartbeatQueue.current = heartbeatQueue.current.then(async () => {
-          if (pendingRequest.current !== item) { resolve('accepted'); return }
-          const outcome = await send(item)
-          if (outcome !== 'network-error') pendingRequest.current = null
+      retryPending.current = async (item) => {
+        if (pendingRequest.current !== item) return 'accepted'
+        const outcome = await send(item)
+        if (outcome !== 'network-error') {
+          pendingRequest.current = null
+          receiptBarrier.current?.settle(item)
           if (outcome === 'rejected') {
             const recoveryKind = transitionRecoveryKind(item.kind, false, serverPlaying.current, pauseRecoveryAttempted.current, item.intentGeneration, intentGeneration.current)
-            if (recoveryKind) {
+            if (recoveryKind && item.intentGeneration === intentGeneration.current) {
               pauseRecoveryAttempted.current = true
               save(confirmedPosition.current, false, recoveryKind)
             }
           }
-          resolve(outcome)
-        })
-      })
-
-      // A transport failure has an unknown outcome. Retry the identical request
-      // first so the server can return its idempotent result before later events.
-      if (pendingRequest.current) {
-        const retrying = pendingRequest.current
-        const retryResult = await send(retrying)
-        if (retryResult === 'network-error') {
-          receiptRetry.current?.remember(retrying)
-          if (kind === 'periodic') periodicPending.current = false
-          return
         }
-        pendingRequest.current = null
-        receiptRetry.current?.resolve(retrying)
-        if (retryResult === 'rejected') {
-          const recoveryKind = transitionRecoveryKind(retrying.kind, false, serverPlaying.current, pauseRecoveryAttempted.current, retrying.intentGeneration, intentGeneration.current)
-          if (recoveryKind && retrying.intentGeneration === intentGeneration.current) {
-            pauseRecoveryAttempted.current = true
-            save(confirmedPosition.current, false, recoveryKind)
-          } else if (retrying.kind === 'pause' || retrying.kind === 'buffering') {
-            setMessage(serverPlaying.current
-              ? 'Pause was not confirmed. Playback remains stopped; resume will resynchronize from confirmed progress.'
-              : 'Playback is paused on the server. No rejected position was added to progress.')
-          }
-          // A newer intent must still be sent after an older retry was rejected.
-          if (request.intentGeneration <= retrying.intentGeneration) {
-            if (kind === 'periodic') periodicPending.current = false
-            return
-          }
-        }
+        return outcome
       }
 
       pendingRequest.current = request
       const result = await send(request)
       if (result !== 'network-error') pendingRequest.current = null
-      if (result === 'network-error') receiptRetry.current?.remember(request)
+      if (result === 'network-error') {
+        receiptBarrier.current?.hold(request)
+        receiptRetry.current?.remember(request)
+      }
       else receiptRetry.current?.resolve(request)
       if (result === 'rejected') {
         const recoveryKind = transitionRecoveryKind(request.kind, false, serverPlaying.current, pauseRecoveryAttempted.current, request.intentGeneration, intentGeneration.current)
@@ -593,7 +582,9 @@ export function VideoPlayer({
   const reveal = () => {
     setControlsVisible(true)
     if (hiddenTimer.current) clearTimeout(hiddenTimer.current)
-    if (playing) hiddenTimer.current = setTimeout(() => setControlsVisible(false), 3000)
+    if (playing) hiddenTimer.current = setTimeout(() => {
+      if (shouldHideControls(true, controlsFocused.current)) setControlsVisible(false)
+    }, 3000)
   }
 
   useEffect(() => {
@@ -612,7 +603,9 @@ export function VideoPlayer({
       setControlsVisible(true)
       if (hiddenTimer.current) clearTimeout(hiddenTimer.current)
       if (document.fullscreenElement === container.current && playing) {
-        hiddenTimer.current = setTimeout(() => setControlsVisible(false), 3000)
+        hiddenTimer.current = setTimeout(() => {
+          if (shouldHideControls(true, controlsFocused.current)) setControlsVisible(false)
+        }, 3000)
       }
     }
     document.addEventListener('fullscreenchange', onFullscreen)
@@ -634,11 +627,20 @@ export function VideoPlayer({
       onMouseLeave={() => {
         if (playing) {
           if (hiddenTimer.current) clearTimeout(hiddenTimer.current)
-          hiddenTimer.current = setTimeout(() => setControlsVisible(false), 3000)
+          hiddenTimer.current = setTimeout(() => {
+            if (shouldHideControls(true, controlsFocused.current)) setControlsVisible(false)
+          }, 3000)
         }
       }}
       onPointerDown={(event) => { if (event.pointerType === 'touch') setControlsVisible((visible) => !visible); else reveal() }}
       onKeyDown={reveal}
+      onFocusCapture={() => { controlsFocused.current = true; reveal() }}
+      onBlurCapture={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+          controlsFocused.current = false
+          reveal()
+        }
+      }}
     >
       <MediaPlayer
         ref={ref}
@@ -682,7 +684,7 @@ export function VideoPlayer({
           }
         }}>{playing ? 'Ⅱ' : '▶'}</button>
         <span className="time-label">{fmt(position)}</span>
-        <div className="timeline-wrap"><div className="timeline-track"><div className="watched-track">{segments.map((segment, index) => <i key={index} style={{ left: `${segment.left}%`, width: `${segment.width}%` }}/>)}</div><div className="playhead" style={{ left: `${duration ? position / duration * 100 : 0}%` }}/><input aria-label="Video timeline" type="range" min={0} max={duration || 1} step="0.1" value={position} onChange={(event) => seek(event.currentTarget)} onPointerDown={reveal} onFocus={reveal}/></div></div>
+        <div className="timeline-wrap"><div className="timeline-track"><div className="watched-track">{segments.map((segment, index) => <i key={index} style={{ left: `${segment.left}%`, width: `${segment.width}%` }}/>)}</div><div className="playhead" style={{ left: `${duration ? position / duration * 100 : 0}%` }}/><input aria-label="Video timeline" aria-valuetext={`${fmt(position)} of ${fmt(duration)}`} type="range" min={0} max={duration || 1} step="0.1" value={position} onChange={(event) => seek(event.currentTarget)} onPointerDown={reveal} onFocus={reveal}/></div></div>
         <span className="time-label">{fmt(duration)}</span>
         <button className="player-button" aria-label={muted || volume === 0 ? 'Unmute' : 'Mute'} onClick={() => { reveal(); if (ref.current) { ref.current.muted = !ref.current.muted; setMuted(ref.current.muted) } }}>{muted || volume === 0 ? '×' : '◖'}</button>
         <input className="volume-slider" aria-label="Volume" type="range" min="0" max="1" step="0.05" value={muted ? 0 : volume} onChange={(event) => { reveal(); const next = Number(event.target.value); if (ref.current) { ref.current.volume = next; ref.current.muted = next === 0 } setVolume(next); setMuted(next === 0) }} onPointerDown={reveal} onFocus={reveal}/>

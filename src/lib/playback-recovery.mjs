@@ -40,3 +40,35 @@ export function createReceiptRetry({ attempt, schedule = setTimeout, cancel = cl
     dispose() { disposed = true; pending = null; if (timer !== null) { cancel(timer); timer = null } },
   }
 }
+
+/** Later intents wait until the outcome of an earlier receipt is known. */
+export function createReceiptBarrier() {
+  let pending = null
+  let release = null
+  let waitPromise = null
+  let disposed = false
+  return {
+    hold(item) {
+      if (disposed || pending) return
+      pending = item
+      waitPromise = new Promise(resolve => { release = resolve })
+    },
+    wait() { return disposed ? Promise.resolve(false) : waitPromise ?? Promise.resolve(true) },
+    settle(item) {
+      if (pending !== item) return
+      pending = null
+      waitPromise = null
+      const finish = release
+      release = null
+      finish?.(true)
+    },
+    dispose() {
+      disposed = true
+      pending = null
+      waitPromise = null
+      const finish = release
+      release = null
+      finish?.(false)
+    },
+  }
+}
