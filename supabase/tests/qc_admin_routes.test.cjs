@@ -57,6 +57,20 @@ test('QC-008 token issuance signs for the stored duration and is never cacheable
   assert.match(response.headers.get('Cache-Control') ?? '', /no-store/)
 })
 
+test('QC-025 maintenance and forbidden token responses carry no-store and nosniff', async () => {
+  const route = load('src/app/api/videos/[id]/playback-token/route.ts', {
+    '@/lib/auth': { getMember: async () => member },
+    '@/lib/playback-gate': { getPlaybackGate: async () => ({ enabled: false, error: 'playback_maintenance' }) },
+    '@/lib/supabase/admin': { adminDb: { from: () => { throw Error('unexpected read') } } },
+    '@/lib/mux': { playbackToken: () => { throw Error('unexpected signing') } },
+  })
+  const response = await route.GET(new Request('http://localhost/api/videos/' + id + '/playback-token'), { params: Promise.resolve({ id }) })
+  assert.equal(response.status, 503)
+  assert.match(response.headers.get('Cache-Control') ?? '', /no-store/)
+  assert.equal(response.headers.get('X-Content-Type-Options'), 'nosniff')
+  assert.match((await response.json()).correlationId, /^[a-f0-9-]{36}$/)
+})
+
 test('QC-025 malformed video identifier is rejected before the token database lookup', async () => {
   const route = load('src/app/api/videos/[id]/playback-token/route.ts', {
     '@/lib/auth': { getMember: async () => member },

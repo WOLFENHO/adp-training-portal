@@ -13,3 +13,18 @@ export function sameOriginMutation(request) {
   const origin = request.headers.get('origin')
   return !origin || origin === new URL(request.url).origin
 }
+
+export function sanitizeHeartbeatRejection(data, correlationId) {
+  const code = typeof data?.code === 'string' && /^[a-z_]{1,48}$/.test(data.code) ? data.code : 'heartbeat_rejected'
+  const receipt = { accepted: false, code, error: 'Playback event was not accepted.', errorId: 'ADP-PRG-006', correlationId }
+  for (const key of ['version', 'lastEventSequence', 'currentLastEventSequence']) {
+    if (Number.isSafeInteger(data?.[key]) && data[key] >= 0) receipt[key] = data[key]
+  }
+  for (const key of ['acceptedPosition', 'currentAcceptedPosition']) {
+    if (typeof data?.[key] === 'number' && Number.isFinite(data[key]) && data[key] >= 0) receipt[key] = data[key]
+  }
+  for (const key of ['serverIsPlaying', 'currentServerIsPlaying']) {
+    if (typeof data?.[key] === 'boolean') receipt[key] = data[key]
+  }
+  return receipt
+}

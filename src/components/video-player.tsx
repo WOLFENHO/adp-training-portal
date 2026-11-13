@@ -69,6 +69,7 @@ export function VideoPlayer({
   const ref = useRef<any>(null)
   const container = useRef<HTMLDivElement | null>(null)
   const session = useRef<string | null>(null)
+  const sessionTerminal = useRef(false)
   const sessionRequest = useRef<{ videoId: string; response: Promise<{ response: Response; data: any }> } | null>(null)
   const retryPending = useRef<((item: Heartbeat) => Promise<RetryOutcome>) | null>(null)
   const receiptRetry = useRef<ReceiptRetry<Heartbeat> | null>(null)
@@ -171,6 +172,7 @@ export function VideoPlayer({
           return
         }
         session.current = data.sessionId
+        sessionTerminal.current = false
         setSessionFailure(false)
         sessionVersion.current = data.version ?? 0
         requestSequence.current = data.lastEventSequence ?? 0
@@ -280,13 +282,28 @@ export function VideoPlayer({
               setMessage('Playback event ordering could not be resynchronized. Reopen the lesson to start a fresh session.')
             } else if (data.code === 'session_expired' || data.code === 'session_inactive' || data.code === 'asset_version_changed') {
               playbackActive.current = false
-              ref.current?.pause()
+              sessionTerminal.current = true
+              session.current = null
+              if (ref.current && !ref.current.paused) {
+                suppressPauseEvent.current = true
+                ref.current.pause()
+              }
               setMessage(data.error || 'Playback session ended. Reopen the lesson from the library.')
             } else if (response.status === 403) {
-              ref.current?.pause()
+              sessionTerminal.current = true
+              session.current = null
+              if (ref.current && !ref.current.paused) {
+                suppressPauseEvent.current = true
+                ref.current.pause()
+              }
               setMessage('Access was revoked or this playback session expired. Reopen the lesson from the library.')
             } else if (data.code === 'client_upgrade_required') {
-              ref.current?.pause()
+              sessionTerminal.current = true
+              session.current = null
+              if (ref.current && !ref.current.paused) {
+                suppressPauseEvent.current = true
+                ref.current.pause()
+              }
               setMessage('The portal was updated. Reload this lesson to continue safely.')
             } else {
               setMessage(`Progress was not accepted (${data.code || `HTTP ${response.status}`}). Playback was not added to confirmed progress.`)
@@ -302,6 +319,8 @@ export function VideoPlayer({
           }
           if (data.currentSessionActive === false) {
             playbackActive.current = false
+            sessionTerminal.current = true
+            session.current = null
             resumingMedia.current = false
             activationRequestId.current = null
             if (ref.current && !ref.current.paused) {
@@ -479,6 +498,12 @@ export function VideoPlayer({
     }
     const playingNow = () => {
       if (el.paused || el.ended || endedAt.current !== null) return
+      if (sessionTerminal.current) {
+        suppressPauseEvent.current = true
+        el.pause()
+        setPlaying(false)
+        return
+      }
       bufferingMedia.current = false
       setPlaying(true)
       setBuffering(false)
@@ -668,6 +693,10 @@ export function VideoPlayer({
         <button className="player-button" aria-label={playing ? 'Pause video' : 'Play video'} onClick={() => {
           const media = ref.current
           if (!media) return
+          if (sessionTerminal.current) {
+            setMessage('Playback session ended. Reopen the lesson from the library.')
+            return
+          }
           if (activationRequestId.current) {
             activationRequestId.current = null
             setPlaying(false)

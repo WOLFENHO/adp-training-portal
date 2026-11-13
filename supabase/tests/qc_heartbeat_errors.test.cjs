@@ -13,6 +13,7 @@ function load(dbError) {
     '@/lib/auth': { getMember: async () => ({ id }) },
     '@/lib/supabase/server': { createClient: async () => ({ rpc: async (name) => name === 'adp_playback_integrity_version' ? { data: 121 } : { error: dbError } }) },
     '@/lib/supabase/admin': { adminDb: { from: () => { throw Error('no privileged diagnostics read permitted') } } },
+    '@/lib/api-errors.mjs': requireApp('./src/lib/api-errors.mjs'),
   }
   new Function('require', 'exports', code)((name) => name in mocks ? mocks[name] : requireApp(name), exports)
   return exports

@@ -4,37 +4,45 @@ import { adminDb } from '@/lib/supabase/admin'
 import { playbackToken } from '@/lib/mux'
 import { getPlaybackGate } from '@/lib/playback-gate'
 import { z } from 'zod'
+import { randomUUID } from 'node:crypto'
 
-export async function GET(_: Request, { params }: { params: Promise<{ id: string }> }) {
+const headers = { 'Cache-Control': 'private, no-store, max-age=0', 'X-Content-Type-Options': 'nosniff' }
+
+export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
+  const correlationId = randomUUID()
+  const fail = (status: number, error: string, reason?: string) => NextResponse.json({ error, ...(reason ? { reason } : {}), errorId: 'ADP-PRG-007', correlationId }, { status, headers })
+  if (request.headers.get('sec-fetch-site') === 'cross-site') return fail(403, 'forbidden')
   const member = await getMember()
-  if (!member) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  if (!member) return fail(403, 'forbidden')
 
-  const gate = await getPlaybackGate()
+  let gate
+  try { gate = await getPlaybackGate() } catch { return fail(503, 'playback_schema_unavailable') }
   if (!gate.enabled) {
     const reason = gate.error === 'playback_maintenance'
       ? 'Verified playback is temporarily disabled.'
       : 'The playback readiness check did not pass.'
-    return NextResponse.json({ error: gate.error, reason }, { status: 503 })
+    return fail(503, gate.error, reason)
   }
 
   const { id } = await params
-  if (!z.string().uuid().safeParse(id).success) return NextResponse.json({ error: 'invalid_request' }, { status: 400, headers: { 'Cache-Control': 'private, no-store, max-age=0' } })
-  const { data: video, error } = await adminDb
+  if (!z.string().uuid().safeParse(id).success) return fail(400, 'invalid_request')
+  let video, error
+  try { ({ data: video, error } = await adminDb
     .from('videos')
     .select('playback_id,published,duration_seconds')
     .eq('id', id)
-    .maybeSingle()
+    .maybeSingle()) } catch { return fail(503, 'video_unavailable') }
   if (error) {
     console.error('[ADP playback] Playback-token video lookup failed', { code: error.code })
-    return NextResponse.json({ error: 'video_unavailable' }, { status: 503 })
+    return fail(503, 'video_unavailable')
   }
   if (!video?.playback_id || (!video.published && !member.is_admin)) {
-    return NextResponse.json({ error: 'not_found' }, { status: 404 })
+    return fail(404, 'not_found')
   }
 
   try {
-    return NextResponse.json({ token: await playbackToken(video.playback_id, video.duration_seconds) }, { headers: { 'Cache-Control': 'private, no-store, max-age=0' } })
+    return NextResponse.json({ token: await playbackToken(video.playback_id, video.duration_seconds) }, { headers })
   } catch {
-    return NextResponse.json({ error: 'playback_signing_unavailable' }, { status: 503, headers: { 'Cache-Control': 'private, no-store, max-age=0' } })
+    return fail(503, 'playback_signing_unavailable')
   }
 }
