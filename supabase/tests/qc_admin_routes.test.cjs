@@ -20,6 +20,7 @@ function admin(db, mux = {}) {
     '@/lib/supabase/admin': { adminDb: db },
     '@/lib/supabase/server': {},
     '@/lib/mux-duration-sync.mjs': {},
+    '@/lib/admin-pages.mjs': {},
     '@/lib/mux': { mux },
   })
 }
@@ -78,4 +79,15 @@ test('QC-025 signing provider failure returns a sanitized non-cacheable response
   assert.equal(response.status, 503)
   assert.equal((await response.json()).error, 'playback_signing_unavailable')
   assert.match(response.headers.get('Cache-Control') ?? '', /no-store/)
+})
+
+test('QC-019 cross-origin or non-JSON browser mutation is rejected before a database write', async () => {
+  let writes = 0
+  const db = { from: () => ({ upsert: async () => { writes++; return { error: null } }, insert: async () => ({ error: null }) }) }
+  const body = JSON.stringify({ action: 'access', discordId: '123456789', enabled: true })
+  const cross = await admin(db).POST(new Request('http://localhost/api/admin', { method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://attacker.invalid' }, body }))
+  const form = await admin(db).POST(new Request('http://localhost/api/admin', { method: 'POST', headers: { 'Content-Type': 'text/plain', 'Sec-Fetch-Site': 'cross-site' }, body }))
+  assert.equal(cross.status, 403)
+  assert.equal(form.status, 403)
+  assert.equal(writes, 0)
 })

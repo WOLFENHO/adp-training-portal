@@ -2,9 +2,12 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import MuxPlayer from '@mux/mux-player-react'
+import { useRouter } from 'next/navigation'
 import { readHeartbeatResponse } from '@/lib/heartbeat-response.mjs'
 import { bindPauseBufferEvents, transitionRecoveryKind } from '@/lib/player-lifecycle.mjs'
 import { playbackSessionMessage } from '@/lib/maintenance-messages.mjs'
+import { createReceiptRetry, fetchWithDeadline, type ReceiptRetry, type RetryOutcome } from '@/lib/playback-recovery.mjs'
+import { visibleVerifiedPercent, intervalMarkers } from '@/lib/player-display.mjs'
 
 type HeartbeatKind = 'play' | 'pause' | 'buffering' | 'periodic' | 'seek' | 'complete'
 type Heartbeat = {
@@ -62,10 +65,13 @@ export function VideoPlayer({
   /** Local integration harness may inject a media adapter; production uses Mux. */
   mediaComponent?: typeof MuxPlayer
 }) {
+  const router = useRouter()
   const ref = useRef<any>(null)
   const container = useRef<HTMLDivElement | null>(null)
   const session = useRef<string | null>(null)
   const sessionRequest = useRef<{ videoId: string; response: Promise<{ response: Response; data: any }> } | null>(null)
+  const retryPending = useRef<((item: Heartbeat) => Promise<RetryOutcome>) | null>(null)
+  const receiptRetry = useRef<ReceiptRetry<Heartbeat> | null>(null)
   const sessionVersion = useRef(0)
   const resumeAt = useRef(0)
   const lastHeartbeat = useRef(0)
@@ -88,19 +94,37 @@ export function VideoPlayer({
   const suppressPauseEvent = useRef(false)
   const confirmedPosition = useRef(0)
   const requestSequence = useRef(0)
+  const completionRefreshSent = useRef(complete)
 
   const [position, setPosition] = useState(0)
   const [confirmed, setConfirmed] = useState(() => initialCoverage(initialIntervals, duration))
+  const [confirmedComplete, setConfirmedComplete] = useState(complete)
   const [playing, setPlaying] = useState(false)
   const [buffering, setBuffering] = useState(true)
   const [muted, setMuted] = useState(false)
   const [volume, setVolume] = useState(1)
   const [message, setMessage] = useState('Preparing secure playback…')
   const [ready, setReady] = useState(false)
+  const [sessionFailure, setSessionFailure] = useState(false)
+  const [sessionAttempt, setSessionAttempt] = useState(0)
   const [controlsVisible, setControlsVisible] = useState(true)
   const [fullscreen, setFullscreen] = useState(false)
   const tokens = useMemo(() => ({ playback: token }), [token])
   const metadata = useMemo(() => ({ video_id: videoId }), [videoId])
+
+  useEffect(() => {
+    const controller = createReceiptRetry<Heartbeat>({
+      attempt: (item) => retryPending.current?.(item) ?? Promise.resolve('network-error'),
+    })
+    receiptRetry.current = controller
+    const online = () => { void controller.retryNow() }
+    window.addEventListener('online', online)
+    return () => {
+      window.removeEventListener('online', online)
+      controller.dispose()
+      if (receiptRetry.current === controller) receiptRetry.current = null
+    }
+  }, [])
 
   const isCovered = (time: number) =>
     intervals.current.some((interval) => time >= interval.start_seconds && time <= interval.end_seconds)
@@ -121,19 +145,24 @@ export function VideoPlayer({
     if (sessionRequest.current?.videoId !== videoId) {
       sessionRequest.current = {
         videoId,
-        response: fetch(`/api/videos/${videoId}/session`, { method: 'POST' })
-          .then(async (response) => ({ response, data: await response.json() })),
+        response: fetchWithDeadline(async (url, options) => {
+          const response = await fetch(url, options)
+          return { response, data: await response.json() }
+        }, `/api/videos/${videoId}/session`, { method: 'POST' }),
       }
     }
     sessionRequest.current.response
       .then(({ response, data }) => {
         if (!alive) return
         if (!response.ok || !data.sessionId) {
+          sessionRequest.current = null
+          setSessionFailure(true)
           setMessage(playbackSessionMessage(data.error, data.reason))
           setBuffering(false)
           return
         }
         session.current = data.sessionId
+        setSessionFailure(false)
         sessionVersion.current = data.version ?? 0
         requestSequence.current = data.lastEventSequence ?? 0
         resumeAt.current = data.position
@@ -145,13 +174,15 @@ export function VideoPlayer({
       })
       .catch(() => {
         if (!alive) return
+        sessionRequest.current = null
+        setSessionFailure(true)
         setMessage('Playback session unavailable.')
         setBuffering(false)
       })
     return () => {
       alive = false
     }
-  }, [videoId])
+  }, [videoId, sessionAttempt])
 
   const intentGeneration = useRef(0)
   const save = useCallback((pos: number, isPlaying: boolean, kind: HeartbeatKind) => {
@@ -187,7 +218,10 @@ export function VideoPlayer({
         item.expectedVersion ??= sessionVersion.current
 
         try {
-          const response = await fetch('/api/videos/heartbeat', {
+          const { response, data } = await fetchWithDeadline(async (url, options) => {
+            const response = await fetch(url, options)
+            return { response, data: (await readHeartbeatResponse(response)).data }
+          }, '/api/videos/heartbeat', {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({
@@ -200,9 +234,7 @@ export function VideoPlayer({
               kind: item.kind,
             }),
           })
-          const { data } = await readHeartbeatResponse(response)
           if (!response.ok || !data.accepted) {
-
             if (Number.isInteger(data.version)) sessionVersion.current = data.version
             if (Number.isSafeInteger(data.currentLastEventSequence ?? data.lastEventSequence)) {
               requestSequence.current = Math.max(requestSequence.current, data.currentLastEventSequence ?? data.lastEventSequence)
@@ -272,7 +304,14 @@ export function VideoPlayer({
             setConfirmed(data.percent ?? 0)
           }
 
-          if (data.complete && (!data.duplicate || (data.currentVersion ?? data.version) === data.version)) setMessage('Training complete.')
+          if (data.complete && (!data.duplicate || (data.currentVersion ?? data.version) === data.version)) {
+            setConfirmedComplete(true)
+            setMessage('Training complete.')
+            if (!completionRefreshSent.current) {
+              completionRefreshSent.current = true
+              router.refresh()
+            }
+          }
           if (item.kind === 'play' && activationRequestId.current === item.requestId) {
             activationRequestId.current = null
             const media = ref.current
@@ -293,12 +332,37 @@ export function VideoPlayer({
             }
           }
           return 'accepted'
-        } catch (error) {
-
+        } catch {
+          if (item.isPlaying && ref.current && !ref.current.paused) {
+            suppressPauseEvent.current = true
+            ref.current.pause()
+            playbackActive.current = false
+            setPlaying(false)
+            setBuffering(false)
+            if (activationRequestId.current === item.requestId) activationRequestId.current = null
+            // The stop follows the exact-request retry in the serialized queue.
+            save(confirmedPosition.current, false, 'pause')
+          }
           setMessage('Network interruption: progress is not confirmed. The same request will retry before newer progress.')
           return 'network-error'
         }
       }
+
+      retryPending.current = (item) => new Promise<RetryOutcome>((resolve) => {
+        heartbeatQueue.current = heartbeatQueue.current.then(async () => {
+          if (pendingRequest.current !== item) { resolve('accepted'); return }
+          const outcome = await send(item)
+          if (outcome !== 'network-error') pendingRequest.current = null
+          if (outcome === 'rejected') {
+            const recoveryKind = transitionRecoveryKind(item.kind, false, serverPlaying.current, pauseRecoveryAttempted.current, item.intentGeneration, intentGeneration.current)
+            if (recoveryKind) {
+              pauseRecoveryAttempted.current = true
+              save(confirmedPosition.current, false, recoveryKind)
+            }
+          }
+          resolve(outcome)
+        })
+      })
 
       // A transport failure has an unknown outcome. Retry the identical request
       // first so the server can return its idempotent result before later events.
@@ -306,11 +370,13 @@ export function VideoPlayer({
         const retrying = pendingRequest.current
         const retryResult = await send(retrying)
         if (retryResult === 'network-error') {
+          receiptRetry.current?.remember(retrying)
           if (kind === 'periodic') periodicPending.current = false
           return
         }
         pendingRequest.current = null
-          if (retryResult === 'rejected') {
+        receiptRetry.current?.resolve(retrying)
+        if (retryResult === 'rejected') {
           const recoveryKind = transitionRecoveryKind(retrying.kind, false, serverPlaying.current, pauseRecoveryAttempted.current, retrying.intentGeneration, intentGeneration.current)
           if (recoveryKind && retrying.intentGeneration === intentGeneration.current) {
             pauseRecoveryAttempted.current = true
@@ -331,6 +397,8 @@ export function VideoPlayer({
       pendingRequest.current = request
       const result = await send(request)
       if (result !== 'network-error') pendingRequest.current = null
+      if (result === 'network-error') receiptRetry.current?.remember(request)
+      else receiptRetry.current?.resolve(request)
       if (result === 'rejected') {
         const recoveryKind = transitionRecoveryKind(request.kind, false, serverPlaying.current, pauseRecoveryAttempted.current, request.intentGeneration, intentGeneration.current)
         if (recoveryKind && generation === intentGeneration.current) {
@@ -347,7 +415,7 @@ export function VideoPlayer({
       if (kind === 'periodic') periodicPending.current = false
     })
     return request.requestId
-  }, [])
+  }, [router])
 
   useEffect(() => {
     const el = ref.current
@@ -551,11 +619,10 @@ export function VideoPlayer({
     return () => document.removeEventListener('fullscreenchange', onFullscreen)
   }, [playing])
 
-  const segments = Array.from({ length: Math.max(1, Math.ceil(duration)) }, (_, second) =>
-    intervals.current.some((interval) => interval.start_seconds < second + 1 && interval.end_seconds > second),
-  )
+  const segments = intervalMarkers(intervals.current, duration)
+  const shownPercent = visibleVerifiedPercent(confirmed, confirmedComplete || complete)
   if (!playbackId || !token || !ready) {
-    return <div className="video-frame"><div className="player-placeholder" role="status">{message}</div></div>
+    return <div className="video-frame"><div className="player-placeholder" role="status">{message}{sessionFailure && playbackId && token && <button className="button" onClick={() => { sessionRequest.current = null; setBuffering(true); setSessionFailure(false); setSessionAttempt((attempt) => attempt + 1) }}>Retry session</button>}</div></div>
   }
 
   return <>
@@ -615,7 +682,7 @@ export function VideoPlayer({
           }
         }}>{playing ? 'Ⅱ' : '▶'}</button>
         <span className="time-label">{fmt(position)}</span>
-        <div className="timeline-wrap"><div className="timeline-track"><div className="watched-track">{segments.map((watched, second) => watched && <i key={second} style={{ left: `${second / duration * 100}%`, width: `${100 / duration}%` }}/>)}</div><div className="playhead" style={{ left: `${duration ? position / duration * 100 : 0}%` }}/><input aria-label="Video timeline" type="range" min={0} max={duration || 1} step="0.1" value={position} onChange={(event) => seek(event.currentTarget)} onPointerDown={reveal} onFocus={reveal}/></div></div>
+        <div className="timeline-wrap"><div className="timeline-track"><div className="watched-track">{segments.map((segment, index) => <i key={index} style={{ left: `${segment.left}%`, width: `${segment.width}%` }}/>)}</div><div className="playhead" style={{ left: `${duration ? position / duration * 100 : 0}%` }}/><input aria-label="Video timeline" type="range" min={0} max={duration || 1} step="0.1" value={position} onChange={(event) => seek(event.currentTarget)} onPointerDown={reveal} onFocus={reveal}/></div></div>
         <span className="time-label">{fmt(duration)}</span>
         <button className="player-button" aria-label={muted || volume === 0 ? 'Unmute' : 'Mute'} onClick={() => { reveal(); if (ref.current) { ref.current.muted = !ref.current.muted; setMuted(ref.current.muted) } }}>{muted || volume === 0 ? '×' : '◖'}</button>
         <input className="volume-slider" aria-label="Volume" type="range" min="0" max="1" step="0.05" value={muted ? 0 : volume} onChange={(event) => { reveal(); const next = Number(event.target.value); if (ref.current) { ref.current.volume = next; ref.current.muted = next === 0 } setVolume(next); setMuted(next === 0) }} onPointerDown={reveal} onFocus={reveal}/>
@@ -632,7 +699,7 @@ export function VideoPlayer({
         }}>⛶</button>
       </div>
     </div>
-    <div className="notice">{complete ? 'This lesson is recorded as complete.' : message} · {confirmed}% server-confirmed</div>
-    <div className="bar"><span style={{ width: `${complete ? 100 : confirmed}%` }}/></div>
+    <div className="notice">{confirmedComplete || complete ? 'This lesson is recorded as complete.' : message} · {shownPercent}% server-confirmed</div>
+    <div className="bar"><span style={{ width: `${shownPercent}%` }}/></div>
   </>
 }

@@ -5,6 +5,7 @@ import { getMember } from '@/lib/auth'
 import { adminDb } from '@/lib/supabase/admin'
 import { randomUUID } from 'crypto'
 import { syncMuxUpload } from '@/lib/mux-duration-sync.mjs'
+import { collectPages } from '@/lib/admin-pages.mjs'
 
 async function authorize() {
   const member = await getMember()
@@ -13,33 +14,31 @@ async function authorize() {
 
 export async function GET() {
   const admin = await authorize()
-  if (!admin) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
+  if (!admin) return NextResponse.json({ error: 'forbidden' }, { status: 403, headers: { 'Cache-Control': 'private, no-store, max-age=0' } })
 
-  const [profilesResult, allowedResult, videosResult, progressResult, completionsResult, verifiedCompletionsResult] = await Promise.all([
-    adminDb.from('profiles').select('*').order('username'),
-    adminDb.from('authorized_discord_ids').select('*'),
-    adminDb.from('videos').select('*').order('sort_order'),
-    adminDb.from('user_video_progress').select('*'),
-    adminDb.from('completion_records').select('user_id,video_id,completed_at,method'),
-    adminDb.from('verified_completion_records').select('user_id,video_id,asset_id,duration_seconds,completed_at,validator_version,asset_identity,reset_at,verified_at'),
-  ])
-  const queryErrors = [profilesResult, allowedResult, videosResult, progressResult, completionsResult, verifiedCompletionsResult]
-    .filter((result) => result.error)
-    .map((result) => ({ code: result.error?.code, message: result.error?.message }))
-  if (queryErrors.length) {
-    console.error('[ADP admin] Dashboard data query failed', { errors: queryErrors })
-    return NextResponse.json({ error: 'admin_data_unavailable' }, { status: 503 })
+  let profiles, allowed, videos, progress, completions, verifiedCompletions
+  try {
+    [profiles, allowed, videos, progress, completions, verifiedCompletions] = await Promise.all([
+      collectPages(async (from, to) => await adminDb.from('profiles').select('*', { count: 'exact' }).order('id').range(from, to)),
+      collectPages(async (from, to) => await adminDb.from('authorized_discord_ids').select('*', { count: 'exact' }).order('discord_id').range(from, to)),
+      collectPages(async (from, to) => await adminDb.from('videos').select('*', { count: 'exact' }).order('id').range(from, to)),
+      collectPages(async (from, to) => await adminDb.from('user_video_progress').select('*', { count: 'exact' }).order('user_id').order('video_id').range(from, to)),
+      collectPages(async (from, to) => await adminDb.from('completion_records').select('user_id,video_id,completed_at,method', { count: 'exact' }).order('user_id').order('video_id').range(from, to)),
+      collectPages(async (from, to) => await adminDb.from('verified_completion_records').select('user_id,video_id,asset_id,duration_seconds,completed_at,validator_version,asset_identity,reset_at,verified_at', { count: 'exact' }).order('user_id').order('video_id').order('asset_id').order('duration_seconds').range(from, to)),
+    ])
+  } catch {
+    console.error('[ADP admin] Dashboard pagination or data query failed')
+    return NextResponse.json({ error: 'admin_data_unavailable' }, { status: 503, headers: { 'Cache-Control': 'private, no-store, max-age=0' } })
   }
-  const profiles = profilesResult.data ?? []
   return NextResponse.json({
     profiles,
-    allowed: allowedResult.data ?? [],
-    videos: videosResult.data ?? [],
-    progress: progressResult.data ?? [],
-    completions: completionsResult.data ?? [],
-    verifiedCompletions: verifiedCompletionsResult.data ?? [],
+    allowed,
+    videos,
+    progress,
+    completions,
+    verifiedCompletions,
     lastActivity: Object.fromEntries(profiles.map((profile) => [profile.id, profile.last_seen_at])),
-  })
+  }, { headers: { 'Cache-Control': 'private, no-store, max-age=0' } })
 }
 
 const schema = z.discriminatedUnion('action', [
@@ -53,6 +52,19 @@ const schema = z.discriminatedUnion('action', [
 ])
 
 export async function POST(request: Request) {
+  const origin = request.headers.get('origin')
+  if (request.headers.get('sec-fetch-site') === 'cross-site' || (origin && origin !== new URL(request.url).origin)) {
+    return NextResponse.json({ error: 'forbidden' }, { status: 403, headers: { 'Cache-Control': 'private, no-store, max-age=0' } })
+  }
+  if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json')) {
+    return NextResponse.json({ error: 'invalid_content_type' }, { status: 415, headers: { 'Cache-Control': 'private, no-store, max-age=0' } })
+  }
+  const response = await handleAdminPost(request)
+  response.headers.set('Cache-Control', 'private, no-store, max-age=0')
+  return response
+}
+
+async function handleAdminPost(request: Request) {
   const member = await authorize()
   if (!member) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
   const parsed = schema.safeParse(await request.json().catch(() => null))

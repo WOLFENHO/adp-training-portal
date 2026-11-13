@@ -11,7 +11,8 @@ function route(file,ready){
  id==='@/lib/supabase/server'?{createClient:async()=>({rpc:async(name)=>{calls.push(name);return {data:ready,error:null}}})}:
  id==='@/lib/supabase/admin'?{adminDb:forbidden}:id==='@/lib/mux'?{mux:forbidden,playbackToken:()=>{throw Error('Unexpected playback token during maintenance')}}:
  id==='@/lib/playback-gate'?evaluate('src/lib/playback-gate.ts'):
- id==='@/lib/mux-duration-sync.mjs'?{syncMuxUpload:()=>{throw Error('Unexpected Mux sync')}}:require(id)
+ id==='@/lib/mux-duration-sync.mjs'?{syncMuxUpload:()=>{throw Error('Unexpected Mux sync')}}:
+ id==='@/lib/admin-pages.mjs'?{collectPages:()=>{throw Error('Unexpected dashboard read')}}:require(id)
  function evaluate(path) {
   const source=ts.transpileModule(fs.readFileSync(path,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText
   const exports={}
@@ -41,6 +42,7 @@ test('admin metadata sync stays disabled independently of playback', async () =>
   const { exports, calls } = route('src/app/api/admin/route.ts', null)
   const response = await exports.POST(new Request('http://localhost/api/admin', {
    method: 'POST',
+   headers: { 'content-type': 'application/json' },
    body: JSON.stringify({ action: 'mux-sync', videoId: body.sessionId }),
   }))
   assert.equal(response.status, 503)
