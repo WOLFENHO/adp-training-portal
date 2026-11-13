@@ -21,6 +21,8 @@ function admin(db, mux = {}) {
     '@/lib/supabase/server': {},
     '@/lib/mux-duration-sync.mjs': {},
     '@/lib/admin-pages.mjs': {},
+    '@/lib/error-registry.mjs': appRequire('./src/lib/error-registry.mjs'),
+    '@/lib/api-errors.mjs': appRequire('./src/lib/api-errors.mjs'),
     '@/lib/mux': { mux },
   })
 }
@@ -104,4 +106,13 @@ test('QC-019 cross-origin or non-JSON browser mutation is rejected before a data
   assert.equal(cross.status, 403)
   assert.equal(form.status, 403)
   assert.equal(writes, 0)
+})
+
+test('QC-018 administrator validation error does not echo untrusted fields', async () => {
+  const malformed = await admin({ from: () => { throw Error('unexpected write') } }).POST(request({ action: 'video-create', title: '', description: 'secret@example.test' }))
+  const body = await malformed.json()
+  assert.equal(malformed.status, 400)
+  assert.match(body.correlationId, /^[a-f0-9-]{36}$/)
+  assert.match(body.errorId, /^ADP-API-/)
+  assert.doesNotMatch(JSON.stringify(body), /secret@example.test|details/)
 })

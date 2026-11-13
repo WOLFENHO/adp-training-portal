@@ -6,6 +6,10 @@ import { adminDb } from '@/lib/supabase/admin'
 import { randomUUID } from 'crypto'
 import { syncMuxUpload } from '@/lib/mux-duration-sync.mjs'
 import { assertDashboardSize, collectPages } from '@/lib/admin-pages.mjs'
+import { identifyError, sanitizeApiError } from '@/lib/error-registry.mjs'
+import { sameOriginMutation } from '@/lib/api-errors.mjs'
+
+const privateHeaders = { 'Cache-Control': 'private, no-store, max-age=0', 'X-Content-Type-Options': 'nosniff' }
 
 async function authorize() {
   const member = await getMember()
@@ -13,8 +17,10 @@ async function authorize() {
 }
 
 export async function GET() {
-  const admin = await authorize()
-  if (!admin) return NextResponse.json({ error: 'forbidden' }, { status: 403, headers: { 'Cache-Control': 'private, no-store, max-age=0' } })
+  const correlationId = randomUUID()
+  let admin
+  try { admin = await authorize() } catch { return NextResponse.json(sanitizeApiError('admin_data_unavailable', correlationId), { status: 503, headers: privateHeaders }) }
+  if (!admin) return NextResponse.json(sanitizeApiError('forbidden', correlationId), { status: 403, headers: privateHeaders })
 
   let profiles, allowed, videos, progress, completions, verifiedCompletions
   try {
@@ -28,8 +34,8 @@ export async function GET() {
     ])
     assertDashboardSize(profiles.length, videos.length)
   } catch {
-    console.error('[ADP admin] Dashboard pagination or data query failed')
-    return NextResponse.json({ error: 'admin_data_unavailable' }, { status: 503, headers: { 'Cache-Control': 'private, no-store, max-age=0' } })
+    console.error('[ADP admin] Dashboard pagination or data query failed', { correlationId, errorId: 'ADP-ADM-002' })
+    return NextResponse.json(sanitizeApiError('admin_data_unavailable', correlationId), { status: 503, headers: privateHeaders })
   }
   return NextResponse.json({
     profiles,
@@ -39,7 +45,7 @@ export async function GET() {
     completions,
     verifiedCompletions,
     lastActivity: Object.fromEntries(profiles.map((profile) => [profile.id, profile.last_seen_at])),
-  }, { headers: { 'Cache-Control': 'private, no-store, max-age=0' } })
+  }, { headers: privateHeaders })
 }
 
 const schema = z.discriminatedUnion('action', [
@@ -53,16 +59,29 @@ const schema = z.discriminatedUnion('action', [
 ])
 
 export async function POST(request: Request) {
-  const origin = request.headers.get('origin')
-  if (request.headers.get('sec-fetch-site') === 'cross-site' || (origin && origin !== new URL(request.url).origin)) {
-    return NextResponse.json({ error: 'forbidden' }, { status: 403, headers: { 'Cache-Control': 'private, no-store, max-age=0' } })
-  }
+  const correlationId = randomUUID()
+  const fail = (code: string, status = identifyError(code).status) => NextResponse.json(sanitizeApiError(code, correlationId), { status, headers: privateHeaders })
+  if (!sameOriginMutation(request)) return fail('forbidden')
   if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json')) {
-    return NextResponse.json({ error: 'invalid_content_type' }, { status: 415, headers: { 'Cache-Control': 'private, no-store, max-age=0' } })
+    return fail('invalid_content_type')
   }
-  const response = await handleAdminPost(request)
-  response.headers.set('Cache-Control', 'private, no-store, max-age=0')
-  return response
+  try {
+    const response = await handleAdminPost(request)
+    if (response.ok) {
+      Object.entries(privateHeaders).forEach(([key, value]) => response.headers.set(key, value))
+      return response
+    }
+    const body = await response.json().catch(() => ({}))
+    const code = typeof body.error === 'string' ? body.error : 'admin_unavailable'
+    const registered = identifyError(code)
+    const status = registered.errorId === 'ADP-ADM-099' ? 503 : response.status
+    const payload = sanitizeApiError(code, correlationId)
+    if (code === 'whitelist_write_failed' && (body.operation === 'add' || body.operation === 'remove')) return NextResponse.json({ ...payload, operation: body.operation }, { status, headers: privateHeaders })
+    return NextResponse.json(payload, { status, headers: privateHeaders })
+  } catch {
+    console.error('[ADP admin] mutation failed unexpectedly', { correlationId, errorId: 'ADP-ADM-099' })
+    return fail('admin_unavailable')
+  }
 }
 
 async function handleAdminPost(request: Request) {

@@ -98,6 +98,8 @@ function componentHarness({ transport, initialPosition = 0, duration = 16.7 }) {
     tree = VideoPlayer(props)
     const player = walk(tree, node => node.type === props.mediaComponent)
     if (player) player.props.ref.current = media
+    const frame = walk(tree, node => typeof node.props?.className === 'string' && node.props.className.startsWith('adp-player '))
+    if (frame) frame.props.ref.current = { contains: () => false }
     for (const { i, fn, deps } of effects) {
       cells[i]?.cleanup?.()
       cells[i] = { deps, cleanup: fn() }
@@ -108,6 +110,8 @@ function componentHarness({ transport, initialPosition = 0, duration = 16.7 }) {
     media, requests, refreshes,
     async flush(ms = 15) { await wait(ms); await wait(0) },
     clickPlay() { const button = walk(tree, node => node.props?.['aria-label'] === 'Play video' || node.props?.['aria-label'] === 'Pause video'); button.props.onClick() },
+    frame() { return walk(tree, node => typeof node.props?.className === 'string' && node.props.className.startsWith('adp-player ')) },
+    controls() { return walk(tree, node => node.props?.className === 'adp-controls') },
     text() { return JSON.stringify(tree, (key, value) => key === 'ref' ? undefined : typeof value === 'function' ? undefined : value) },
     online() { listeners.get('online')?.() },
     dispose() { if (disposed) return; disposed = true; for (const value of cells) value?.cleanup?.(); global.fetch = oldFetch; global.window = oldWindow; global.document = oldDocument },

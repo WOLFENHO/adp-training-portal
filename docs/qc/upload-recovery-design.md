@@ -1,0 +1,14 @@
+# QC-026 durable upload recovery candidate
+
+Current Production flow creates a Mux direct upload first, inserts a video second, and returns the upload URL. A lost response can cause another upload on retry; a failed insert can leave an unrecorded Mux upload. Existing in-memory file-transfer retry only helps while the page stays open.
+
+The isolated `adp_upload_intents` table candidate records a unique client operation ID, authenticated administrator, request hash, unpublished video ID, provider upload ID and URL, expiry, state, and lease. Client roles have no table access. The signed upload URL must never appear in logs or generic dashboard results.
+
+## Proposed server flow after isolated database tests
+
+1. Administrator generates one operation UUID and retains it for the whole attempt. The server validates the current whitelist/admin role, canonicalizes title/description, and hashes that payload. A single database transaction reserves the operation and creates an unpublished video with the predetermined video ID and audit event. Replaying the same operation with a changed actor or payload returns 409.
+2. A conditional lease permits one worker to call Mux. Save the exact Mux upload ID and URL to the intent before returning it. Retrying a saved, unexpired `waiting` intent returns that same target. If the Mux call succeeds but its database write or response is lost, mark `needs_reconciliation` and block automatic new provider creation.
+3. Reconcile by listing **all** Mux direct uploads, following every page, and matching the exact video ID in `new_asset_settings.passthrough`. One matching upload can be bound after provider status and origin checks. Zero or multiple matches require manual review; an empty list is not proof of noncreation. Mux documents [retrieval](https://www.mux.com/docs/api-reference/video/direct-uploads/get-direct-upload) and [listing](https://www.mux.com/docs/api-reference/video/direct-uploads/list-direct-uploads) of direct uploads. The [create reference](https://www.mux.com/docs/api-reference/video/direct-uploads/create-direct-upload) does not document an idempotency key.
+4. Discover unbound provider uploads separately, report only IDs/status in an administrator-only no-store review, and preserve provider resources. Do not automatically delete assets or video history. An expired direct-upload URL is a recoverable state requiring a deliberate new operation after reconciliation.
+
+Before application wiring, isolate and test simultaneous duplicate requests, process crash before/after provider creation, lost provider and HTTP responses, stale lease, expired URL, provider pagination and eventual consistency, cross-admin replay, signed URL exposure, audit failure, asset-created recovery, and rollback. Roll back application routing separately from the schema; keep intent records as recovery evidence. The SQL candidate is unexecuted and does not itself implement the reservation transaction.

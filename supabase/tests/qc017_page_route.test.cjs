@@ -1,0 +1,27 @@
+const test = require('node:test')
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const ts = require('typescript')
+const { createRequire } = require('node:module')
+const appRequire = createRequire(process.cwd() + '/package.json')
+
+function route(member, page) {
+  const source = ts.transpileModule(fs.readFileSync('src/app/api/admin/page/route.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
+  const exports = {}
+  new Function('require', 'exports', source)((id) => ({
+    '@/lib/auth': { getMember: async () => member },
+    '@/lib/supabase/admin': { adminDb: {} },
+    '@/lib/admin-keyset.mjs': { pageAdminRows: page },
+  })[id] ?? appRequire(id), exports)
+  return exports
+}
+
+test('QC-017 page route checks authorization and parameters before privileged read', async () => {
+  const forbidden = route({ is_admin: false }, () => { throw Error('query reached') })
+  assert.equal((await forbidden.GET(new Request('http://localhost/api/admin/page?view=videos'))).status, 403)
+  const admin = route({ is_admin: true }, async () => ({ rows: [{ id: 'fixture' }], nextCursor: null }))
+  assert.equal((await admin.GET(new Request('http://localhost/api/admin/page?view=videos&limit=9999'))).status, 400)
+  const response = await admin.GET(new Request('http://localhost/api/admin/page?view=videos&limit=50'))
+  assert.equal(response.status, 200)
+  assert.match(response.headers.get('Cache-Control') ?? '', /no-store/)
+})
