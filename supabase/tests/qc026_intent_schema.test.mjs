@@ -11,4 +11,8 @@ test('QC-026 isolated ledger has unique idempotency identity and no client URL a
   assert.match(sql, /revoke all on public\.adp_upload_intents from public,anon,authenticated/)
   assert.match(sql, /on delete restrict/g)
   assert.doesNotMatch(sql, /delete from|grant.*authenticated/)
+  assert.match(sql, /create trigger adp_upload_intent_immutable/)
+  assert.match(sql, /old\.operation_id is distinct from new\.operation_id/)
+  assert.match(sql, /old\.actor_id is distinct from new\.actor_id/)
+  assert.match(sql, /old\.video_id is distinct from new\.video_id/)
 })
