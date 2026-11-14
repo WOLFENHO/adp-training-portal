@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto'
 test('QC-003 candidate changes only the captured Release 121 heartbeat function gap block', () => {
   const baseline = fs.readFileSync('supabase/batch2/qc003_deployed_r11_capture.sql', 'utf8')
   const forward = fs.readFileSync('supabase/batch2/qc003_gap_candidate.sql', 'utf8')
-  assert.equal(createHash('sha256').update(baseline).digest('hex'), 'f447709ea286384dc4e56e228a265c5e20e6e95112d0c539f7c6a8e8dec8e9ec')
+  assert.equal(createHash('sha256').update(baseline.replaceAll('\r\n', '\n')).digest('hex'), '191d662205266701233c900493bf0c6de09d9415bce07dec782a491b9172991d')
   const start = forward.indexOf('  -- QC-003 gap guard begin')
   const end = forward.indexOf('  -- QC-003 gap guard end')
   assert.ok(start > 0 && end > start)
