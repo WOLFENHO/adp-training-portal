@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { pageAdminRows, encodeAdminCursor } from '../../src/lib/admin-keyset.mjs'
-process.env.SUPABASE_SERVICE_ROLE_KEY = 'isolated-cursor-test-key'
+process.env.ADP_ADMIN_CURSOR_SECRET = 'isolated-cursor-secret-32-byte-minimum'
 
 const ids = Array.from({ length: 103 }, (_, n) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`)
 const db = { from(table) { assert.equal(table, 'videos'); return {
@@ -64,4 +64,40 @@ test('QC-017 whitelist has a bounded administrator page', async () => {
 test('QC-017 progress query retains legacy completion timestamp', async () => {
   const source = await import('node:fs').then(fs => fs.readFileSync('src/lib/admin-keyset.mjs', 'utf8'))
   assert.match(source, /progress: \{[^\n]*completed_at/)
+})
+
+test('QC-017 missing dedicated secret fails before privileged read even on first page', async () => {
+  const saved = process.env.ADP_ADMIN_CURSOR_SECRET
+  delete process.env.ADP_ADMIN_CURSOR_SECRET
+  process.env.SUPABASE_SERVICE_ROLE_KEY = 'legacy-key-must-not-sign-cursors'
+  try {
+    await assert.rejects(pageAdminRows({ from() { throw Error('privileged query reached') } }, { view: 'videos' }), /cursor configuration unavailable/)
+  } finally { process.env.ADP_ADMIN_CURSOR_SECRET = saved; delete process.env.SUPABASE_SERVICE_ROLE_KEY }
+})
+
+test('QC-017 key changes invalidate cursors and page-size limits reject before query', async () => {
+  const first = await pageAdminRows(db, { view: 'videos', limit: 1, actorId: ids[0] })
+  const saved = process.env.ADP_ADMIN_CURSOR_SECRET
+  process.env.ADP_ADMIN_CURSOR_SECRET = 'different-isolated-cursor-secret-32-bytes'
+  const forbidden = { from() { throw Error('privileged query reached') } }
+  try {
+    await assert.rejects(pageAdminRows(forbidden, { view: 'videos', cursor: first.nextCursor, actorId: ids[0] }), /invalid cursor/)
+    await assert.rejects(pageAdminRows(forbidden, { view: 'videos', limit: 101 }), /invalid page/)
+    await assert.rejects(pageAdminRows(forbidden, { view: 'videos', limit: 0 }), /invalid page/)
+  } finally { process.env.ADP_ADMIN_CURSOR_SECRET = saved }
+})
+
+test('QC-017 standalone historical and verified completion pages have stable composite cursors', async () => {
+  const video = ids[1], user = ids[0]
+  const fixture = {
+    historical: [{ user_id: user, video_id: video, completed_at: '2026-11-01' }],
+    verified: [{ user_id: user, video_id: video, asset_id: 'assetABC_123', duration_seconds: 16.7, completed_at: '2026-11-01' }],
+  }
+  const database = { from(table) { const view = table === 'completion_records' ? 'historical' : table === 'verified_completion_records' ? 'verified' : null; assert.ok(view); return {
+    select() { return this }, order() { return this }, or() { return this }, async limit() { return { data: fixture[view], error: null } },
+  } } }
+  for (const view of ['historical', 'verified']) {
+    const page = await pageAdminRows(database, { view, limit: 1, actorId: user })
+    assert.equal(page.rows.length, 1)
+  }
 })

@@ -4,15 +4,17 @@ const fs = require('node:fs')
 const ts = require('typescript')
 const { createRequire } = require('node:module')
 const appRequire = createRequire(process.cwd() + '/package.json')
+process.env.ADP_ADMIN_CURSOR_SECRET = 'isolated-cursor-secret-32-byte-minimum'
 
 function route(member, page) {
   const source = ts.transpileModule(fs.readFileSync('src/app/api/admin/page/route.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText
   const exports = {}
   new Function('require', 'exports', source)((id) => ({
-    '@/lib/auth': { getMember: async () => { if (member instanceof Error) throw member; return member } },
+    '@/lib/auth': { getMember: async () => { if (member instanceof Error) throw member; return typeof member === 'function' ? member() : member } },
     '@/lib/supabase/admin': { adminDb: {} },
     '@/lib/admin-keyset.mjs': { pageAdminRows: page },
     '@/lib/admin-progress-page.mjs': { enrichProgressPage: async (_db, rows) => rows },
+    '@/lib/admin-completion-page.mjs': { enrichCompletionPage: async (_db, rows) => rows },
     '@/lib/error-registry.mjs': appRequire('./src/lib/error-registry.mjs'),
   })[id] ?? appRequire(id), exports)
   return exports
@@ -42,4 +44,17 @@ test('QC-018 malformed pagination has its stable error category', async () => {
   const response = await admin.GET(new Request('http://localhost/api/admin/page?view=videos&limit=100000'))
   assert.equal(response.status, 400)
   assert.equal((await response.json()).errorId, 'ADP-API-001')
+})
+
+test('QC-017 missing cursor secret fails before member or service-role lookup', async () => {
+  const saved = process.env.ADP_ADMIN_CURSOR_SECRET
+  delete process.env.ADP_ADMIN_CURSOR_SECRET
+  let memberCalls = 0
+  const endpoint = route(() => { memberCalls++; throw Error('member lookup reached') }, () => { throw Error('database lookup reached') })
+  try {
+    const response = await endpoint.GET(new Request('http://localhost/api/admin/page?view=videos'))
+    assert.equal(response.status, 503)
+    assert.equal((await response.json()).error, 'admin_data_unavailable')
+    assert.equal(memberCalls, 0)
+  } finally { if (saved === undefined) delete process.env.ADP_ADMIN_CURSOR_SECRET; else process.env.ADP_ADMIN_CURSOR_SECRET = saved }
 })

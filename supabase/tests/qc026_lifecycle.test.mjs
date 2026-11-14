@@ -62,3 +62,39 @@ test('QC-026 reconciliation scans every page and refuses ambiguous matches', asy
   assert.deepEqual(await reviewUpload(mux, request.videoId), { action: 'manual_review' })
   assert.equal((await reviewOrphanUploads(mux, new Set())).length, 2)
 })
+
+test('QC-026 concurrent reservation performs one provider creation and leaves second for reconciliation', async () => {
+  const state = fixture()
+  const [a, b] = await Promise.allSettled([createOrResumeUpload(state, request), createOrResumeUpload(state, request)])
+  assert.equal(state.creates, 1)
+  assert.equal([a, b].filter(result => result.status === 'fulfilled').length, 1)
+  assert.equal([a, b].filter(result => result.status === 'rejected').length, 1)
+})
+
+test('QC-026 failed target binding quarantines provider resource and rejects retry', async () => {
+  const state = fixture()
+  state.ledger.setTarget = async () => { throw Error('database write failed') }
+  await assert.rejects(createOrResumeUpload(state, request), /review/)
+  assert.equal(state.creates, 1)
+  assert.equal(state.intents.get(request.operationId).status, 'needs_reconciliation')
+  await assert.rejects(createOrResumeUpload(state, request), /review/)
+  assert.equal(state.creates, 1)
+  assert.equal(state.uploads.length, 1)
+})
+
+test('QC-026 terminal retry verifies current video binding before reporting completion', async () => {
+  const state = fixture()
+  state.intents.set(request.operationId, { ...request, status: 'asset_created', uploadId: 'upload-1', assetId: 'asset-A', playbackId: 'signed-A' })
+  state.mux.retrieve = async () => ({ id: 'upload-1', status: 'asset_created', asset_id: 'asset-A', new_asset_settings: { passthrough: request.videoId } })
+  state.mux.retrieveAsset = async () => ({ id: 'asset-A', playback_ids: [{ policy: 'signed', id: 'signed-A' }] })
+  state.ledger.verifyBinding = async () => false
+  await assert.rejects(createOrResumeUpload(state, request), /review/)
+  state.ledger.verifyBinding = async () => true
+  assert.equal((await createOrResumeUpload(state, request)).action, 'complete')
+  state.mux.retrieve = async () => ({ id: 'upload-1', status: 'asset_created', asset_id: 'asset-B', new_asset_settings: { passthrough: request.videoId } })
+  await assert.rejects(createOrResumeUpload(state, request), /review/)
+  state.mux.retrieve = async () => ({ id: 'upload-1', status: 'asset_created', asset_id: 'asset-A', new_asset_settings: { passthrough: request.videoId } })
+  state.mux.retrieveAsset = async () => ({ id: 'asset-A', playback_ids: [{ policy: 'signed', id: 'signed-B' }] })
+  await assert.rejects(createOrResumeUpload(state, request), /review/)
+  assert.equal(state.creates, 0)
+})

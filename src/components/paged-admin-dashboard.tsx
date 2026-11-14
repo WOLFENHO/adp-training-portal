@@ -3,22 +3,26 @@ import { useEffect, useRef, useState } from 'react'
 import { transferExistingUpload } from '@/lib/upload-transfer.mjs'
 import { adminDashboardMessage, adminMutationMessage } from '@/lib/maintenance-messages.mjs'
 
-type View = 'profiles' | 'allowed' | 'videos' | 'progress'
+type View = 'profiles' | 'allowed' | 'videos' | 'progress' | 'historical' | 'verified'
 type Page = { rows: any[]; nextCursor: string | null; cursor: string | null; previous: (string | null)[]; loading: boolean; error: string | null }
 const blank = (): Page => ({ rows: [], nextCursor: null, cursor: null, previous: [], loading: false, error: null })
-const names: View[] = ['profiles', 'allowed', 'videos', 'progress']
+const names: View[] = ['profiles', 'allowed', 'videos', 'progress', 'historical', 'verified']
+
+function CompletionRows({ rows }: { rows: any[] }) {
+  return <div className="table-wrap"><table><thead><tr><th scope="col">Member</th><th scope="col">Video</th><th scope="col">Evidence</th><th scope="col">Recorded</th><th scope="col">Progress row</th></tr></thead><tbody>{rows.map((row, index) => <tr key={`${row.userId}-${row.videoId}-${index}`}><td>{row.username}</td><td>{row.title}</td><td>{row.status}</td><td>{row.completedAt ? new Date(row.completedAt).toLocaleString() : '—'}</td><td>{row.hasProgress ? 'Present' : 'No progress record'}</td></tr>)}</tbody></table></div>
+}
 
 export function PagedAdminDashboard() {
   const [tab, setTab] = useState<'users' | 'videos' | 'progress'>('users')
   const [pages, setPages] = useState<Record<View, Page>>(() => Object.fromEntries(names.map(name => [name, blank()])) as Record<View, Page>)
   const [notice, setNotice] = useState(''), [busy, setBusy] = useState(false)
   const [pending, setPending] = useState<{ uploadUrl: string; file: File; videoId: string } | null>(null)
-  const generations = useRef<Record<View, number>>({ profiles: 0, allowed: 0, videos: 0, progress: 0 })
+  const generations = useRef<Record<View, number>>({ profiles: 0, allowed: 0, videos: 0, progress: 0, historical: 0, verified: 0 })
 
   async function load(view: View, cursor: string | null = null, previous: (string | null)[] = []) {
     const generation = ++generations.current[view]
     setPages(current => ({ ...current, [view]: { ...current[view], loading: true, error: null } }))
-    const query = new URLSearchParams({ view, limit: view === 'progress' ? '20' : '50' })
+    const query = new URLSearchParams({ view, limit: ['progress', 'historical', 'verified'].includes(view) ? '20' : '50' })
     if (cursor) query.set('cursor', cursor)
     try {
       const response = await fetch(`/api/admin/page?${query}`, { cache: 'no-store' })
@@ -30,7 +34,7 @@ export function PagedAdminDashboard() {
     }
   }
   useEffect(() => { void load('profiles'); void load('allowed') }, [])
-  function select(next: typeof tab) { setTab(next); if (next !== 'users') void load(next) }
+  function select(next: typeof tab) { setTab(next); if (next === 'progress') { void load('progress'); void load('historical'); void load('verified') } else if (next === 'videos') void load('videos') }
   function controls(view: View) {
     const page = pages[view]
     return <><nav className="row" aria-label={`${view} pages`}>
@@ -51,7 +55,7 @@ export function PagedAdminDashboard() {
         setPending(target); await transferExistingUpload(target); setPending(null)
       }
       setNotice(input.action === 'progress-complete' ? 'Historical completion recorded.' : 'Saved. Reloaded the affected page.')
-      await Promise.all((input.action === 'access' ? ['allowed', 'profiles'] as View[] : [input.action.startsWith('progress-') ? 'progress' : 'videos'] as View[]).map(view => load(view)))
+      await Promise.all((input.action === 'access' ? ['allowed', 'profiles'] as View[] : input.action.startsWith('progress-') ? ['progress', 'historical', 'verified'] as View[] : ['videos'] as View[]).map(view => load(view)))
       return true
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Operation failed.'); return false }
     finally { setBusy(false) }
@@ -72,5 +76,9 @@ export function PagedAdminDashboard() {
       {pages.videos.rows.map(video => <form key={video.id} className="panel form-grid" onSubmit={event => { event.preventDefault(); const values = new FormData(event.currentTarget); void act({ action: 'video-update', videoId: video.id, title: values.get('title'), description: values.get('description'), thumbnailUrl: values.get('thumbnailUrl') || null, published: values.get('published') === 'on', sortOrder: Number(values.get('sortOrder')) }) }}><input name="title" className="field" aria-label={`Title for ${video.title}`} defaultValue={video.title} required /><input name="sortOrder" className="field" aria-label={`Sort order for ${video.title}`} type="number" defaultValue={video.sort_order} /><textarea name="description" className="field" aria-label={`Description for ${video.title}`} defaultValue={video.description} /><input name="thumbnailUrl" className="field" aria-label={`Thumbnail URL for ${video.title}`} defaultValue={video.thumbnail_url || ''} /><label className="row"><input name="published" type="checkbox" defaultChecked={video.published} disabled={!canPublish(video) && !video.published} /> Published · {canPublish(video) ? 'Mux metadata verified' : 'Mux metadata pending verification'}</label><div className="row"><button className="button" disabled={busy}>Save video</button>{video.mux_upload_id && !video.duration_precision_verified && <button type="button" className="button secondary" disabled={busy} onClick={() => confirm('Synchronize this video’s Mux metadata and reconcile progress?') && void act({ action: 'mux-sync', videoId: video.id })}>Sync Mux metadata</button>}<span className="sub">Unpublish to remove from the library while retaining training history.</span></div></form>)}
     </>}
     {tab === 'progress' && <div className="panel"><h2>Recorded progress</h2><p className="sub">Only saved progress records appear. Verified and historical completions are separate.</p>{controls('progress')}{!pages.progress.rows.length && !pages.progress.loading && !pages.progress.error ? <p className="sub">No progress records on this page.</p> : <div className="table-wrap"><table><thead><tr><th scope="col">Member</th><th scope="col">Video</th><th scope="col">Status</th><th scope="col">Verified coverage</th><th scope="col">Verified completion</th><th scope="col">Historical completion</th><th scope="col">Actions</th></tr></thead><tbody>{pages.progress.rows.map(row => <tr key={`${row.userId}-${row.videoId}`}><td>{row.username}</td><td>{row.title}</td><td>{row.label}</td><td>{Math.floor(row.verifiedWatchedSeconds)} / {row.durationSeconds}s ({row.percent}%)</td><td>{row.verifiedCompletedAt ? new Date(row.verifiedCompletedAt).toLocaleString() : '—'}</td><td>{row.historicalCompletedAt ? new Date(row.historicalCompletedAt).toLocaleString() : '—'}</td><td className="row">{!row.hasHistoricalRecord && row.status !== 'verified_completed' && <button type="button" className="button secondary" disabled={busy} onClick={() => void act({ action: 'progress-complete', userId: row.userId, videoId: row.videoId })}>Mark historical</button>}<button type="button" className="button danger" disabled={busy} onClick={() => void act({ action: 'progress-reset', userId: row.userId, videoId: row.videoId })}>Reset</button></td></tr>)}</tbody></table></div>}</div>}
+    {tab === 'progress' && <>
+      <div className="panel"><h2>Historical completion records</h2>{controls('historical')}{!pages.historical.rows.length && !pages.historical.loading && !pages.historical.error ? <p className="sub">No historical completion records on this page.</p> : <CompletionRows rows={pages.historical.rows} />}</div>
+      <div className="panel"><h2>Verified completion evidence</h2>{controls('verified')}{!pages.verified.rows.length && !pages.verified.loading && !pages.verified.error ? <p className="sub">No verified completion records on this page.</p> : <CompletionRows rows={pages.verified.rows} />}</div>
+    </>}
   </>
 }

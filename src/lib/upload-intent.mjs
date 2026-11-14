@@ -13,7 +13,12 @@ export function planUploadOperation(existing, request, now = new Date()) {
 /** List must be exhaustive; an empty result is never authority to create anew. */
 export function reconcileUploadCandidates(videoId, uploads) {
   const matches = uploads.filter(upload => upload.new_asset_settings?.passthrough === videoId)
-  return matches.length === 1 ? { action: 'bind', uploadId: matches[0].id } : { action: 'manual_review' }
+  if (matches.length !== 1) return { action: 'manual_review' }
+  const match = matches[0]
+  if (typeof match.id !== 'string' || !match.id ||
+      !['waiting', 'asset_created'].includes(match.status) ||
+      (match.status === 'asset_created' && !match.asset_id)) return { action: 'manual_review' }
+  return { action: 'bind', uploadId: match.id }
 }
 
 /** Candidate review only. Never delete a provider upload or asset automatically. */

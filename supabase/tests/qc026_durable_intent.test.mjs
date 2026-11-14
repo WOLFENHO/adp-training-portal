@@ -21,6 +21,9 @@ test('QC-026 reconciliation binds one exact passthrough match and quarantines am
   assert.deepEqual(reconcileUploadCandidates('video-1', uploads), { action: 'bind', uploadId: 'mux-1' })
   assert.equal(reconcileUploadCandidates('video-1', [uploads[0], { ...uploads[0], id: 'mux-2' }]).action, 'manual_review')
   assert.equal(reconcileUploadCandidates('video-1', []).action, 'manual_review')
+  assert.equal(reconcileUploadCandidates('video-1', [{ ...uploads[0], status: 'timed_out' }]).action, 'manual_review')
+  assert.equal(reconcileUploadCandidates('video-1', [{ ...uploads[0], status: 'asset_created', asset_id: 'asset-A' }]).action, 'bind')
+  assert.equal(reconcileUploadCandidates('video-1', [{ ...uploads[0], status: 'asset_created' }]).action, 'manual_review')
 })
 
 test('QC-026 orphan discovery is read-only and never proposes deletion', () => {

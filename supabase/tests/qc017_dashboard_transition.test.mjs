@@ -10,4 +10,7 @@ test('QC-017 dashboard fetches bounded pages and exposes keyboard pagination', (
   assert.match(source, /Next page/)
   assert.match(source, /Previous page/)
   assert.doesNotMatch(source, /data\.profiles\.flatMap/)
+  assert.match(source, /controls\('historical'\)/)
+  assert.match(source, /controls\('verified'\)/)
+  assert.match(source, /No progress record/)
 })
