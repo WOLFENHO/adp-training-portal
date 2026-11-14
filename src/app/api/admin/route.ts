@@ -66,7 +66,7 @@ export async function POST(request: Request) {
     return fail('invalid_content_type')
   }
   try {
-    const response = await handleAdminPost(request)
+    const response = await handleAdminPost(request, correlationId)
     if (response.ok) {
       Object.entries(privateHeaders).forEach(([key, value]) => response.headers.set(key, value))
       return response
@@ -84,7 +84,7 @@ export async function POST(request: Request) {
   }
 }
 
-async function handleAdminPost(request: Request) {
+async function handleAdminPost(request: Request, correlationId: string) {
   const member = await authorize()
   if (!member) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
   const parsed = schema.safeParse(await request.json().catch(() => null))
@@ -109,18 +109,18 @@ async function handleAdminPost(request: Request) {
     const { data: video, error: videoError } = await adminDb
       .from('videos').select('mux_upload_id,duration_precision_verified').eq('id', input.videoId).maybeSingle()
     if (videoError) {
-      console.error('[ADP admin] Video metadata sync lookup failed', { code: videoError.code, message: videoError.message })
+      console.error('[ADP admin] Video metadata sync lookup failed', { correlationId, errorId: 'ADP-ADM-002', databaseCode: videoError.code ?? null })
       return NextResponse.json({ error: 'admin_data_unavailable' }, { status: 503 })
     }
     if (!video?.mux_upload_id) return NextResponse.json({ error: 'mux_upload_missing' }, { status: 404 })
     if (video.duration_precision_verified) return NextResponse.json({ error: 'metadata_already_verified' }, { status: 409 })
     const { mux } = await import('@/lib/mux')
-    const syncResult = await syncMuxUpload(video.mux_upload_id, { mux, adminDb })
+    const syncResult = await syncMuxUpload(video.mux_upload_id, { mux, adminDb, correlationId })
     if (syncResult.verified) {
       const { error: auditError } = await adminDb.from('admin_audit_log').insert({
         admin_id: member.id, action: 'mux-sync', details: { videoId: input.videoId, verified: true },
       })
-      if (auditError) console.error('[ADP admin] Mux sync audit log write failed', { code: auditError.code, message: auditError.message })
+      if (auditError) console.error('[ADP admin] Mux sync audit log write failed', { correlationId, errorId: 'ADP-ADM-099', databaseCode: auditError.code ?? null })
     }
     return NextResponse.json(syncResult.verified ? syncResult : { ...syncResult, error: 'mux_sync_failed' }, { status: syncResult.verified ? 200 : 502 })
   }
@@ -130,13 +130,13 @@ async function handleAdminPost(request: Request) {
     if (input.enabled) {
       const { error } = await adminDb.from('authorized_discord_ids').upsert({ discord_id: input.discordId, added_by: member.discord_id }, { onConflict: 'discord_id' })
       if (error) {
-        console.error('[ADP admin] Whitelist write failed', { operation: 'add', code: error.code, message: error.message })
+        console.error('[ADP admin] Whitelist write failed', { correlationId, errorId: 'ADP-ADM-009', operation: 'add', databaseCode: error.code ?? null })
         return NextResponse.json({ error: 'whitelist_write_failed', operation: 'add', databaseCode: error.code || null }, { status: 503 })
       }
     } else {
       const { error } = await adminDb.from('authorized_discord_ids').delete().eq('discord_id', input.discordId)
       if (error) {
-        console.error('[ADP admin] Whitelist write failed', { operation: 'remove', code: error.code, message: error.message })
+        console.error('[ADP admin] Whitelist write failed', { correlationId, errorId: 'ADP-ADM-009', operation: 'remove', databaseCode: error.code ?? null })
         return NextResponse.json({ error: 'whitelist_write_failed', operation: 'remove', databaseCode: error.code || null }, { status: 503 })
       }
     }
@@ -150,12 +150,12 @@ async function handleAdminPost(request: Request) {
     try {
       upload = await mux.video.uploads.create({ cors_origin: new URL(request.url).origin, new_asset_settings: { playback_policies: ['signed'], video_quality: 'basic', passthrough: videoId } })
     } catch (error) {
-      console.error('[ADP admin] Mux upload creation failed', { status: (error as { status?: number })?.status, reason: error instanceof Error ? error.message : 'unknown' })
+      console.error('[ADP admin] Mux upload creation failed', { correlationId, errorId: 'ADP-ADM-007', providerStatus: (error as { status?: number })?.status ?? null })
       return NextResponse.json({ error: 'mux_upload_creation_failed' }, { status: 502 })
     }
     const { error } = await adminDb.from('videos').insert({ id: videoId, title: input.title, description: input.description, published: false, sort_order: 999, mux_upload_id: upload.id, duration_seconds: 0 })
     if (error) {
-      console.error('[ADP admin] Video record insert failed after Mux upload creation', { code: error.code, message: error.message, uploadId: upload.id })
+      console.error('[ADP admin] Video record insert failed after Mux upload creation', { correlationId, errorId: 'ADP-ADM-008', databaseCode: error.code ?? null })
       return NextResponse.json({ error: 'video_record_create_failed', databaseCode: error.code || null }, { status: 503 })
     }
     result = { ok: true, videoId, uploadId: upload.id, uploadUrl: upload.url }
@@ -164,7 +164,7 @@ async function handleAdminPost(request: Request) {
     if (input.published) {
       const { data: video, error: readinessError } = await adminDb.from('videos').select('playback_id,duration_seconds,duration_precision_verified').eq('id', input.videoId).maybeSingle()
       if (readinessError) {
-        console.error('[ADP admin] Video publish readiness check failed', { code: readinessError.code, message: readinessError.message })
+        console.error('[ADP admin] Video publish readiness check failed', { correlationId, errorId: 'ADP-ADM-017', databaseCode: readinessError.code ?? null })
         return NextResponse.json({ error: 'video_publish_check_failed', databaseCode: readinessError.code || null }, { status: 503 })
       }
       if (!video) return NextResponse.json({ error: 'video_not_found' }, { status: 404 })
@@ -174,7 +174,7 @@ async function handleAdminPost(request: Request) {
     }
     const { data: updatedVideo, error } = await adminDb.from('videos').update({ title: input.title, description: input.description, thumbnail_url: input.thumbnailUrl, published: input.published, sort_order: input.sortOrder }).eq('id', input.videoId).select('id').maybeSingle()
     if (error) {
-      console.error('[ADP admin] Video record update failed', { code: error.code, message: error.message })
+      console.error('[ADP admin] Video record update failed', { correlationId, errorId: 'ADP-ADM-006', databaseCode: error.code ?? null })
       return NextResponse.json({ error: 'video_record_update_failed', databaseCode: error.code || null }, { status: 503 })
     }
     if (!updatedVideo) return NextResponse.json({ error: 'video_not_found' }, { status: 404 })
@@ -191,6 +191,6 @@ async function handleAdminPost(request: Request) {
     return NextResponse.json(data)
   }
   const { error: auditError } = await adminDb.from('admin_audit_log').insert({ admin_id: member.id, action: input.action, details: input })
-  if (auditError) console.error('[ADP admin] audit log write failed', { action: input.action, code: auditError.code, message: auditError.message })
+  if (auditError) console.error('[ADP admin] audit log write failed', { correlationId, errorId: 'ADP-ADM-099', action: input.action, databaseCode: auditError.code ?? null })
   return NextResponse.json(result)
 }

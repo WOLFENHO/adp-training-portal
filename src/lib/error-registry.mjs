@@ -2,6 +2,7 @@
 const entries = Object.freeze({
   forbidden: ['ADP-AUTH-003', 403, 'Administrator or member access is required.'],
   sign_out_unavailable: ['ADP-AUTH-004', 503, 'Sign-out could not finish. Try again.'],
+  oauth_callback_unavailable: ['ADP-AUTH-005', 503, 'Sign-in could not finish. Try again.'],
   invalid_request: ['ADP-API-001', 400, 'Check the request and try again.'],
   invalid_content_type: ['ADP-API-002', 415, 'Send a JSON request.'],
   invalid_cursor: ['ADP-API-003', 400, 'The page cursor is invalid. Start again from the first page.'],
