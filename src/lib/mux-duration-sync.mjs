@@ -4,6 +4,7 @@
  * reconciles historical coverage atomically.
  */
 import { randomUUID } from 'node:crypto'
+/** @param {string} uploadId @param {{ mux: any, adminDb: any, correlationId?: string }} dependencies */
 export async function syncMuxUpload(uploadId, { mux, adminDb, correlationId = randomUUID() }) {
   let upload
   let asset
