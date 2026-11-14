@@ -13,7 +13,11 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
     NextResponse.json({ error: code, errorId, correlationId, reason }, { status, headers })
 
   if (!sameOriginMutation(request)) return fail(403, 'forbidden', 'ADP-AUTH-003', 'Request origin rejected.')
-  const member = await getMember()
+  let member
+  try { member = await getMember() } catch {
+    console.error('[ADP playback] session authorization unavailable', { correlationId, errorId: 'ADP-PRG-004' })
+    return fail(503, 'session_unavailable', 'ADP-PRG-004', 'Playback session could not be started. Try again.')
+  }
   if (!member) return fail(403, 'forbidden', 'ADP-AUTH-003', 'Member session missing or access revoked.')
   if (process.env.PLAYBACK_HEARTBEATS_ENABLED !== 'true') return fail(503, 'playback_maintenance', 'ADP-PRG-001', 'Verified playback is temporarily disabled.')
 

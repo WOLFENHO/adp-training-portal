@@ -5,14 +5,19 @@ import { playbackToken } from '@/lib/mux'
 import { getPlaybackGate } from '@/lib/playback-gate'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
+import { identifyError } from '@/lib/error-registry.mjs'
 
 const headers = { 'Cache-Control': 'private, no-store, max-age=0', 'X-Content-Type-Options': 'nosniff' }
 
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
   const correlationId = randomUUID()
-  const fail = (status: number, error: string, reason?: string) => NextResponse.json({ error, ...(reason ? { reason } : {}), errorId: 'ADP-PRG-007', correlationId }, { status, headers })
+  const fail = (status: number, error: string, reason?: string) => NextResponse.json({ error, ...(reason ? { reason } : {}), errorId: identifyError(error).errorId, correlationId }, { status, headers })
   if (request.headers.get('sec-fetch-site') === 'cross-site') return fail(403, 'forbidden')
-  const member = await getMember()
+  let member
+  try { member = await getMember() } catch {
+    console.error('[ADP playback] token authorization unavailable', { correlationId, errorId: 'ADP-PRG-007' })
+    return fail(503, 'playback_signing_unavailable')
+  }
   if (!member) return fail(403, 'forbidden')
 
   let gate

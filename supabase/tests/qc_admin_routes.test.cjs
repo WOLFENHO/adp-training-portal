@@ -8,7 +8,7 @@ const ts = appRequire('typescript')
 function load(file, mocks) {
   const source = ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText
   const exports = {}
-  new Function('require', 'exports', source)((id) => id in mocks ? mocks[id] : appRequire(id), exports)
+  new Function('require', 'exports', source)((id) => id in mocks ? mocks[id] : id === '@/lib/error-registry.mjs' ? appRequire('./src/lib/error-registry.mjs') : appRequire(id), exports)
   return exports
 }
 
@@ -71,6 +71,23 @@ test('QC-025 maintenance and forbidden token responses carry no-store and nosnif
   assert.match(response.headers.get('Cache-Control') ?? '', /no-store/)
   assert.equal(response.headers.get('X-Content-Type-Options'), 'nosniff')
   assert.match((await response.json()).correlationId, /^[a-f0-9-]{36}$/)
+})
+
+test('QC-018 token maintenance and authorization use their registered error IDs', async () => {
+  const route = load('src/app/api/videos/[id]/playback-token/route.ts', {
+    '@/lib/auth': { getMember: async () => member },
+    '@/lib/playback-gate': { getPlaybackGate: async () => ({ enabled: false, error: 'playback_maintenance' }) },
+    '@/lib/supabase/admin': {}, '@/lib/mux': {},
+  })
+  const response = await route.GET(new Request('http://localhost'), { params: Promise.resolve({ id }) })
+  assert.equal((await response.json()).errorId, 'ADP-PRG-001')
+  const authFailure = load('src/app/api/videos/[id]/playback-token/route.ts', {
+    '@/lib/auth': { getMember: async () => { throw Error('secret auth failure') } },
+    '@/lib/playback-gate': {}, '@/lib/supabase/admin': {}, '@/lib/mux': {},
+  })
+  const denied = await authFailure.GET(new Request('http://localhost'), { params: Promise.resolve({ id }) })
+  assert.equal(denied.status, 503)
+  assert.doesNotMatch(await denied.text(), /secret auth failure/)
 })
 
 test('QC-025 malformed video identifier is rejected before the token database lookup', async () => {

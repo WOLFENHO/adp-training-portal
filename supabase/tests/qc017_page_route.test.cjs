@@ -12,6 +12,8 @@ function route(member, page) {
     '@/lib/auth': { getMember: async () => { if (member instanceof Error) throw member; return member } },
     '@/lib/supabase/admin': { adminDb: {} },
     '@/lib/admin-keyset.mjs': { pageAdminRows: page },
+    '@/lib/admin-progress-page.mjs': { enrichProgressPage: async (_db, rows) => rows },
+    '@/lib/error-registry.mjs': appRequire('./src/lib/error-registry.mjs'),
   })[id] ?? appRequire(id), exports)
   return exports
 }
@@ -33,4 +35,11 @@ test('QC-018 paged admin authorization outage is a redacted service error', asyn
   const text = await response.text()
   assert.doesNotMatch(text, /sensitive database detail/)
   assert.match(text, /correlationId/)
+})
+
+test('QC-018 malformed pagination has its stable error category', async () => {
+  const admin = route({ id: 'fixture', is_admin: true }, () => { throw Error('query reached') })
+  const response = await admin.GET(new Request('http://localhost/api/admin/page?view=videos&limit=100000'))
+  assert.equal(response.status, 400)
+  assert.equal((await response.json()).errorId, 'ADP-API-001')
 })

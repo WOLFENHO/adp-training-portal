@@ -19,7 +19,11 @@ export async function POST(request: Request) {
   const correlationId = randomUUID()
   const fail = (status: number, code: string, error: string) => NextResponse.json({ accepted: false, code, error, errorId: code === 'forbidden' ? 'ADP-AUTH-003' : 'ADP-PRG-006', correlationId }, { status, headers })
   if (!sameOriginMutation(request)) return fail(403, 'forbidden', 'Request origin rejected.')
-  const member = await getMember()
+  let member
+  try { member = await getMember() } catch {
+    console.error('[ADP playback] heartbeat authorization unavailable', { correlationId, code: 'heartbeat_unavailable' })
+    return fail(503, 'heartbeat_unavailable', 'Progress could not be confirmed. Try again.')
+  }
   if (!member) return fail(403, 'forbidden', 'Member session missing or access revoked.')
   const parsed = schema.safeParse(await request.json().catch(() => null))
   if (!parsed.success) return fail(400, 'invalid_request', 'Invalid heartbeat request.')

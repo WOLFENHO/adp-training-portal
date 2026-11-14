@@ -6,11 +6,11 @@ const requireApp = createRequire(process.cwd() + '/package.json')
 const ts = requireApp('typescript')
 const id = '11111111-1111-4111-8111-111111111111'
 
-function load(dbError) {
+function load(dbError, memberFailure = false) {
   const code = ts.transpileModule(fs.readFileSync('src/app/api/videos/heartbeat/route.ts', 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText
   const exports = {}
   const mocks = {
-    '@/lib/auth': { getMember: async () => ({ id }) },
+    '@/lib/auth': { getMember: async () => { if (memberFailure) throw Error('private authentication detail'); return { id } } },
     '@/lib/supabase/server': { createClient: async () => ({ rpc: async (name) => name === 'adp_playback_integrity_version' ? { data: 121 } : { error: dbError } }) },
     '@/lib/supabase/admin': { adminDb: { from: () => { throw Error('no privileged diagnostics read permitted') } } },
     '@/lib/api-errors.mjs': requireApp('./src/lib/api-errors.mjs'),
@@ -35,4 +35,12 @@ test('QC-018 heartbeat failure never returns database details or logs identifier
     assert.match(body.correlationId, /^[a-f0-9-]{36}$/)
     assert.doesNotMatch(JSON.stringify({ body, logs }), /secret-password|private session error|sessionId|userId/)
   } finally { console.error = original }
+})
+
+test('QC-018 heartbeat authentication outage is sanitized and tagged', async () => {
+  const response = await load(null, true).POST(new Request('http://localhost/api/videos/heartbeat', { method: 'POST' }))
+  assert.equal(response.status, 503)
+  const body = await response.text()
+  assert.match(body, /correlationId/)
+  assert.doesNotMatch(body, /private authentication detail/)
 })
