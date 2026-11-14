@@ -4,7 +4,7 @@ const views = {
   allowed: { table: 'authorized_discord_ids', fields: 'discord_id,added_at', keys: ['discord_id'], validate: value => /^\d{5,25}$/.test(value) },
   videos: { table: 'videos', fields: 'id,title,description,published,sort_order,duration_seconds,duration_precision_verified,mux_upload_id,playback_id,asset_id,thumbnail_url,created_at', keys: ['id'] },
   profiles: { table: 'profiles', fields: 'id,discord_id,username,avatar_url,last_seen_at', keys: ['id'] },
-  progress: { table: 'user_video_progress', fields: 'user_id,video_id,watched_seconds,verified_watched_seconds,updated_at', keys: ['user_id', 'video_id'] },
+  progress: { table: 'user_video_progress', fields: 'user_id,video_id,watched_seconds,verified_watched_seconds,completed_at,updated_at', keys: ['user_id', 'video_id'] },
 }
 
 function cursorKey() {

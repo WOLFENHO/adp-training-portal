@@ -60,3 +60,8 @@ test('QC-017 whitelist has a bounded administrator page', async () => {
   const page = await pageAdminRows(whitelist, { view: 'allowed', actorId: ids[0] })
   assert.equal(page.rows.length, 1)
 })
+
+test('QC-017 progress query retains legacy completion timestamp', async () => {
+  const source = await import('node:fs').then(fs => fs.readFileSync('src/lib/admin-keyset.mjs', 'utf8'))
+  assert.match(source, /progress: \{[^\n]*completed_at/)
+})
