@@ -1,5 +1,7 @@
 # ADP controlled integration acceptance package
 
+The independently authorizable execution boundaries are in [integration-authorization-tracks.md](integration-authorization-tracks.md). This document retains the full test and operational matrix.
+
 Candidates: application `498773a7392eaed94bd3f86814919e3c69efa6ae`; SQL `ecab89bd47e7132daa50610cf03539c7ef3cb037`. Keep these refs separate. This package is preparation only. Production baseline remains `22481bcac2de4f53edddc7508814e555d54d61fe`.
 
 ## Observed environment and boundary
