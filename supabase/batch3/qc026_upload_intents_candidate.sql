@@ -71,14 +71,25 @@ revoke all on public.adp_upload_intents from public,anon,authenticated;
 -- requires a separate isolated authorization and transaction review.
 grant select,insert,update on public.adp_upload_intents to service_role;
 
--- Authenticated RPCs retain auth.uid() and recheck current whitelist/admin
--- membership on every operation. The caller cannot write the ledger directly.
+-- Only the server's service role can invoke these RPCs. A fresh database
+-- whitelist/admin check is still required for the actor authenticated by the
+-- application. Direct authenticated Data API callers cannot supply provider
+-- identifiers to the privileged binding RPC.
+create function public.adp_upload_actor_authorized_qc026(p_actor_id uuid) returns boolean
+language sql stable security definer set search_path=public,pg_temp as $$
+  select exists(
+    select 1 from public.profiles p
+    join public.authorized_discord_ids w on w.discord_id=p.discord_id
+    join public.administrator_roles a on a.discord_id=p.discord_id
+    where p.id=p_actor_id
+  )
+$$;
 create function public.adp_reserve_upload_intent_qc026(
-  p_operation_id uuid,p_video_id uuid,p_request_hash text,p_title text,p_description text
+  p_actor_id uuid,p_operation_id uuid,p_video_id uuid,p_request_hash text,p_title text,p_description text
 ) returns jsonb language plpgsql security definer set search_path=public,pg_temp as $$
-declare actor uuid:=auth.uid(); r public.adp_upload_intents%rowtype;
+declare actor uuid:=p_actor_id; r public.adp_upload_intents%rowtype;
 begin
-  if actor is null or not public.is_authorized() or not public.is_administrator() then raise exception 'not authorized' using errcode='42501'; end if;
+  if not public.adp_upload_actor_authorized_qc026(actor) then raise exception 'not authorized' using errcode='42501'; end if;
   if p_operation_id is null or p_video_id is null or p_request_hash !~ '^[a-f0-9]{64}$' or
      length(trim(p_title)) not between 1 and 180 or length(p_description)>4000 then
     raise exception 'invalid upload request' using errcode='22023';
@@ -102,11 +113,11 @@ begin
     'expiresAt',r.url_expires_at,'assetId',r.mux_asset_id,'playbackId',r.signed_playback_id);
 end $$;
 
-create function public.adp_claim_upload_intent_qc026(p_operation_id uuid) returns boolean
+create function public.adp_claim_upload_intent_qc026(p_actor_id uuid,p_operation_id uuid) returns boolean
 language plpgsql security definer set search_path=public,pg_temp as $$
-declare actor uuid:=auth.uid(); r public.adp_upload_intents%rowtype;
+declare actor uuid:=p_actor_id; r public.adp_upload_intents%rowtype;
 begin
-  if actor is null or not public.is_authorized() or not public.is_administrator() then raise exception 'not authorized' using errcode='42501'; end if;
+  if not public.adp_upload_actor_authorized_qc026(actor) then raise exception 'not authorized' using errcode='42501'; end if;
   select * into r from public.adp_upload_intents where operation_id=p_operation_id for update;
   if not found or r.actor_id<>actor or r.state<>'reserved' then return false; end if;
   update public.adp_upload_intents set state='creating',lease_until=clock_timestamp()+interval '2 minutes' where operation_id=p_operation_id;
@@ -114,11 +125,11 @@ begin
 end $$;
 
 create function public.adp_bind_upload_intent_qc026(
-  p_operation_id uuid,p_upload_id text,p_upload_url text,p_expires_at timestamptz
+  p_actor_id uuid,p_operation_id uuid,p_upload_id text,p_upload_url text,p_expires_at timestamptz
 ) returns boolean language plpgsql security definer set search_path=public,pg_temp as $$
-declare actor uuid:=auth.uid(); r public.adp_upload_intents%rowtype; v public.videos%rowtype;
+declare actor uuid:=p_actor_id; r public.adp_upload_intents%rowtype; v public.videos%rowtype;
 begin
-  if actor is null or not public.is_authorized() or not public.is_administrator() then raise exception 'not authorized' using errcode='42501'; end if;
+  if not public.adp_upload_actor_authorized_qc026(actor) then raise exception 'not authorized' using errcode='42501'; end if;
   if nullif(p_upload_id,'') is null or nullif(p_upload_url,'') is null or p_expires_at<=clock_timestamp() then
     raise exception 'invalid provider target' using errcode='22023'; end if;
   select * into r from public.adp_upload_intents where operation_id=p_operation_id for update;
@@ -133,11 +144,11 @@ begin
   return true;
 end $$;
 
-create function public.adp_mark_upload_review_qc026(p_operation_id uuid) returns boolean
+create function public.adp_mark_upload_review_qc026(p_actor_id uuid,p_operation_id uuid) returns boolean
 language plpgsql security definer set search_path=public,pg_temp as $$
-declare actor uuid:=auth.uid(); r public.adp_upload_intents%rowtype;
+declare actor uuid:=p_actor_id; r public.adp_upload_intents%rowtype;
 begin
-  if actor is null or not public.is_authorized() or not public.is_administrator() then raise exception 'not authorized' using errcode='42501'; end if;
+  if not public.adp_upload_actor_authorized_qc026(actor) then raise exception 'not authorized' using errcode='42501'; end if;
   select * into r from public.adp_upload_intents where operation_id=p_operation_id for update;
   if not found or r.actor_id<>actor or r.state not in ('reserved','creating') then return false; end if;
   update public.adp_upload_intents set state='needs_reconciliation',lease_until=null where operation_id=p_operation_id;
@@ -146,11 +157,11 @@ begin
   return true;
 end $$;
 
-create function public.adp_finalize_upload_intent_qc026(p_video_id uuid) returns boolean
+create function public.adp_finalize_upload_intent_qc026(p_actor_id uuid,p_video_id uuid) returns boolean
 language plpgsql security definer set search_path=public,pg_temp as $$
-declare actor uuid:=auth.uid(); r public.adp_upload_intents%rowtype; v public.videos%rowtype;
+declare actor uuid:=p_actor_id; r public.adp_upload_intents%rowtype; v public.videos%rowtype;
 begin
-  if actor is null or not public.is_authorized() or not public.is_administrator() then raise exception 'not authorized' using errcode='42501'; end if;
+  if not public.adp_upload_actor_authorized_qc026(actor) then raise exception 'not authorized' using errcode='42501'; end if;
   select * into r from public.adp_upload_intents where video_id=p_video_id for update;
   if not found then return false; end if;
   if r.state not in ('waiting','uploaded','manual_review') then return false; end if;
@@ -164,10 +175,13 @@ begin
   return true;
 end $$;
 
-revoke all on function public.adp_reserve_upload_intent_qc026(uuid,uuid,text,text,text),
-  public.adp_claim_upload_intent_qc026(uuid),public.adp_bind_upload_intent_qc026(uuid,text,text,timestamptz),
-  public.adp_mark_upload_review_qc026(uuid),public.adp_finalize_upload_intent_qc026(uuid) from public,anon,service_role;
-grant execute on function public.adp_reserve_upload_intent_qc026(uuid,uuid,text,text,text),
-  public.adp_claim_upload_intent_qc026(uuid),public.adp_bind_upload_intent_qc026(uuid,text,text,timestamptz),
-  public.adp_mark_upload_review_qc026(uuid),public.adp_finalize_upload_intent_qc026(uuid) to authenticated;
+revoke all on function public.adp_upload_actor_authorized_qc026(uuid),
+  public.adp_reserve_upload_intent_qc026(uuid,uuid,uuid,text,text,text),
+  public.adp_claim_upload_intent_qc026(uuid,uuid),public.adp_bind_upload_intent_qc026(uuid,uuid,text,text,timestamptz),
+  public.adp_mark_upload_review_qc026(uuid,uuid),public.adp_finalize_upload_intent_qc026(uuid,uuid)
+  from public,anon,authenticated;
+grant execute on function public.adp_reserve_upload_intent_qc026(uuid,uuid,uuid,text,text,text),
+  public.adp_claim_upload_intent_qc026(uuid,uuid),public.adp_bind_upload_intent_qc026(uuid,uuid,text,text,timestamptz),
+  public.adp_mark_upload_review_qc026(uuid,uuid),public.adp_finalize_upload_intent_qc026(uuid,uuid)
+  to service_role;
 commit;

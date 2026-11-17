@@ -152,8 +152,7 @@ async function handleAdminPost(request: Request, correlationId: string) {
     const syncResult = await syncMuxUpload(video.mux_upload_id, { mux, adminDb, correlationId })
     if (syncResult.verified) {
       if (intent) {
-        const client = await createClient()
-        const finalized = await client.rpc('adp_finalize_upload_intent_qc026', { p_video_id: input.videoId })
+        const finalized = await adminDb.rpc('adp_finalize_upload_intent_qc026', { p_actor_id: member.id, p_video_id: input.videoId })
         if (finalized.error || finalized.data !== true) {
           console.error('[ADP admin] Upload metadata saved but intent finalization requires review',
             { correlationId, errorId: 'ADP-ADM-019', databaseCode: finalized.error?.code ?? null })
@@ -187,7 +186,6 @@ async function handleAdminPost(request: Request, correlationId: string) {
   }
   if (input.action === 'video-create') {
     if (!process.env.MUX_TOKEN_ID || !process.env.MUX_TOKEN_SECRET) return NextResponse.json({ error: 'mux_credentials_missing' }, { status: 503 })
-    const client = await createClient()
     const payloadHash = createHash('sha256').update(JSON.stringify([input.title, input.description])).digest('hex')
     const operation = { operationId: input.operationId, videoId: input.videoId, actorId: member.id, payloadHash,
       title: input.title, description: input.description }
@@ -195,27 +193,27 @@ async function handleAdminPost(request: Request, correlationId: string) {
     // one transaction. No provider request is allowed before that succeeds.
     const ledger = {
       async reserve() {
-        const { data, error } = await client.rpc('adp_reserve_upload_intent_qc026', {
-          p_operation_id: input.operationId, p_video_id: input.videoId, p_request_hash: payloadHash,
+        const { data, error } = await adminDb.rpc('adp_reserve_upload_intent_qc026', {
+          p_actor_id: member.id, p_operation_id: input.operationId, p_video_id: input.videoId, p_request_hash: payloadHash,
           p_title: input.title, p_description: input.description,
         })
         if (error) throw error
         return data
       },
       async claim() {
-        const { data, error } = await client.rpc('adp_claim_upload_intent_qc026', { p_operation_id: input.operationId })
+        const { data, error } = await adminDb.rpc('adp_claim_upload_intent_qc026', { p_actor_id: member.id, p_operation_id: input.operationId })
         if (error) throw error
         return data === true
       },
       async setTarget(_row: unknown, upload: { id: string; url: string; expiresAt: string }) {
-        const { data, error } = await client.rpc('adp_bind_upload_intent_qc026', {
-          p_operation_id: input.operationId, p_upload_id: upload.id,
+        const { data, error } = await adminDb.rpc('adp_bind_upload_intent_qc026', {
+          p_actor_id: member.id, p_operation_id: input.operationId, p_upload_id: upload.id,
           p_upload_url: upload.url, p_expires_at: upload.expiresAt,
         })
         if (error || data !== true) throw error ?? Error('upload binding rejected')
       },
       async markReview() {
-        const { error } = await client.rpc('adp_mark_upload_review_qc026', { p_operation_id: input.operationId })
+        const { error } = await adminDb.rpc('adp_mark_upload_review_qc026', { p_actor_id: member.id, p_operation_id: input.operationId })
         if (error) throw error
       },
     }
@@ -226,6 +224,9 @@ async function handleAdminPost(request: Request, correlationId: string) {
           const upload = await mux.video.uploads.create({ cors_origin: new URL(request.url).origin,
             timeout: 3600, new_asset_settings: { playback_policies: ['signed'], video_quality: 'basic', passthrough: videoId } })
           if (!upload?.id || !upload.url) throw Error('provider response incomplete')
+          const verified = await mux.video.uploads.retrieve(upload.id)
+          if (verified?.id !== upload.id || verified?.status !== 'waiting' ||
+              verified?.new_asset_settings?.passthrough !== videoId) throw Error('provider upload identity mismatch')
           return { id: upload.id, url: upload.url, expiresAt: new Date(Date.now() + 3540_000).toISOString() }
         },
       } }, operation)

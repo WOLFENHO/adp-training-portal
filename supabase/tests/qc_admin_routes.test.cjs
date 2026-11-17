@@ -14,9 +14,9 @@ function load(file, mocks) {
 
 const id = '11111111-1111-4111-8111-111111111111'
 const member = { id, discord_id: '123456789', is_admin: true }
-function admin(db, mux = {}, client = {}) {
+function admin(db, mux = {}, client = {}, currentMember = member) {
   return load('src/app/api/admin/route.ts', {
-    '@/lib/auth': { getMember: async () => member },
+    '@/lib/auth': { getMember: async () => currentMember },
     '@/lib/supabase/admin': { adminDb: db },
     '@/lib/supabase/server': { createClient: async () => client },
     '@/lib/mux-duration-sync.mjs': {},
@@ -145,9 +145,12 @@ test('QC-026 route reserves and claims before one provider create; duplicate ret
     if (name === 'adp_bind_upload_intent_qc026') { state.status = 'waiting'; state.uploadId = args.p_upload_id; state.uploadUrl = args.p_upload_url; state.expiresAt = args.p_expires_at; return { data: true, error: null } }
     throw Error(`unexpected RPC: ${name}`)
   } }
-  const mux = { video: { uploads: { create: async () => { order.push('mux.create'); return { id: 'mux-fixture', url: 'https://upload.mux.test/fixture' } } } } }
+  const mux = { video: { uploads: {
+    create: async () => { order.push('mux.create'); return { id: 'mux-fixture', url: 'https://upload.mux.test/fixture' } },
+    retrieve: async () => ({ id: 'mux-fixture', status: 'waiting', new_asset_settings: { passthrough: videoId } }),
+  } } }
   process.env.MUX_TOKEN_ID = 'fixture'; process.env.MUX_TOKEN_SECRET = 'fixture'
-  const route = admin({}, mux, client)
+  const route = admin(client, mux, { rpc: () => { throw Error('authenticated RPC unexpectedly invoked') } })
   const payload = { action: 'video-create', operationId, videoId, title: 'Fixture', description: '' }
   const first = await route.POST(request(payload))
   const second = await route.POST(request(payload))
@@ -156,11 +159,32 @@ test('QC-026 route reserves and claims before one provider create; duplicate ret
   assert.deepEqual(order, ['adp_reserve_upload_intent_qc026', 'adp_claim_upload_intent_qc026', 'mux.create', 'adp_bind_upload_intent_qc026', 'adp_reserve_upload_intent_qc026'])
 })
 
+test('QC-026 mismatched provider identity is quarantined before database binding', async () => {
+  const operationId = id, videoId = '22222222-2222-4222-8222-222222222222'
+  let bound = 0, reviewed = 0
+  const database = { rpc: async name => {
+    if (name === 'adp_reserve_upload_intent_qc026') return { data: { operationId, videoId, actorId: id, payloadHash: require('node:crypto').createHash('sha256').update(JSON.stringify(['Fixture', ''])).digest('hex'), status: 'reserved' }, error: null }
+    if (name === 'adp_claim_upload_intent_qc026') return { data: true, error: null }
+    if (name === 'adp_bind_upload_intent_qc026') { bound++; return { data: true, error: null } }
+    if (name === 'adp_mark_upload_review_qc026') { reviewed++; return { data: true, error: null } }
+    throw Error('unexpected RPC')
+  } }
+  const mux = { video: { uploads: {
+    create: async () => ({ id: 'upload-1', url: 'https://provider.invalid/target' }),
+    retrieve: async () => ({ id: 'upload-1', url: 'https://provider.invalid/target', status: 'waiting', new_asset_settings: { passthrough: 'wrong-video' } }),
+  } } }
+  process.env.MUX_TOKEN_ID = 'fixture'; process.env.MUX_TOKEN_SECRET = 'fixture'
+  const response = await admin(database, mux, database).POST(request({ action: 'video-create', operationId, videoId, title: 'Fixture', description: '' }))
+  assert.equal(response.status, 503)
+  assert.equal(bound, 0)
+  assert.equal(reviewed, 1)
+})
+
 test('QC-026 reserve failure and lost Mux response never start a second provider create', async () => {
   const operationId = id, videoId = '22222222-2222-4222-8222-222222222222', payload = { action: 'video-create', operationId, videoId, title: 'Fixture', description: '' }
   let creates = 0, status = 'reserved', review = 0
   const mux = { video: { uploads: { create: async () => { creates++; throw Error('ambiguous secret provider response') } } } }
-  const failedReserve = admin({}, mux, { rpc: async () => ({ data: null, error: { code: 'PGRST202', message: 'secret DB detail' } }) })
+  const failedReserve = admin({ rpc: async () => ({ data: null, error: { code: 'PGRST202', message: 'secret DB detail' } }) }, mux)
   const blocked = await failedReserve.POST(request(payload))
   assert.equal(blocked.status, 503); assert.equal(creates, 0)
   assert.doesNotMatch(await blocked.text(), /secret DB detail/)
@@ -170,7 +194,7 @@ test('QC-026 reserve failure and lost Mux response never start a second provider
     if (name === 'adp_mark_upload_review_qc026') { status = 'needs_reconciliation'; review++; return { data: true, error: null } }
     throw Error('unexpected RPC')
   } }
-  const route = admin({}, mux, client)
+  const route = admin(client, mux, { rpc: () => { throw Error('authenticated RPC unexpectedly invoked') } })
   const first = await route.POST(request(payload)), retry = await route.POST(request(payload))
   assert.equal(first.status, 503); assert.equal(retry.status, 503)
   assert.equal(creates, 1); assert.equal(review, 1)
@@ -204,4 +228,15 @@ test('QC-026 read-only review counts all provider pages without exposing upload 
   assert.match(body, /"providerMatches":1/)
   assert.match(body, /"manualReviewRequired":true/)
   assert.doesNotMatch(body, /secret-url|candidate|unrelated/)
+})
+
+
+test('QC-026 unauthorized caller cannot reserve or obtain a signed upload URL', async () => {
+  let calls = 0
+  const db = { rpc: async () => { calls++; throw Error('privileged invocation') } }
+  const mux = { video: { uploads: { create: async () => { calls++; throw Error('provider invocation') } } } }
+  const response = await admin(db, mux, {}, null).POST(request({ action: 'video-create', operationId: id, videoId: id, title: 'Fixture', description: '' }))
+  assert.ok([401, 403].includes(response.status))
+  assert.equal(calls, 0)
+  assert.doesNotMatch(await response.text(), /uploadUrl|provider invocation|privileged invocation/)
 })
