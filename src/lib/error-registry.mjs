@@ -31,6 +31,9 @@ const entries = Object.freeze({
   mux_sync_failed: ['ADP-ADM-015', 502, 'Mux metadata could not be synchronized.'],
   bootstrap_admin_locked: ['ADP-ADM-016', 400, 'The bootstrap administrator cannot be removed.'],
   video_publish_check_failed: ['ADP-ADM-017', 503, 'Video publishing readiness could not be checked.'],
+  upload_intent_conflict: ['ADP-ADM-018', 409, 'This upload attempt changed. Review the pending upload before starting another.'],
+  upload_requires_reconciliation: ['ADP-ADM-019', 503, 'The upload state is uncertain. Ask an administrator to review it before retrying.'],
+  admin_progress_unavailable: ['ADP-ADM-020', 503, 'The progress action could not be confirmed. Reload before trying again.'],
   admin_unavailable: ['ADP-ADM-099', 503, 'The administrator operation could not be completed.'],
 })
 

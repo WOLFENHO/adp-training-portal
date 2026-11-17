@@ -3,11 +3,12 @@ import { NextResponse } from 'next/server'
 import { z } from 'zod'
 import { getMember } from '@/lib/auth'
 import { adminDb } from '@/lib/supabase/admin'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import { syncMuxUpload } from '@/lib/mux-duration-sync.mjs'
 import { assertDashboardSize, collectPages } from '@/lib/admin-pages.mjs'
 import { identifyError, sanitizeApiError } from '@/lib/error-registry.mjs'
 import { sameOriginMutation } from '@/lib/api-errors.mjs'
+import { createOrResumeUpload } from '@/lib/upload-lifecycle.mjs'
 
 const privateHeaders = { 'Cache-Control': 'private, no-store, max-age=0', 'X-Content-Type-Options': 'nosniff' }
 
@@ -51,7 +52,8 @@ export async function GET() {
 const schema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('mux-sync'), videoId: z.string().uuid() }),
   z.object({ action: z.literal('access'), discordId: z.string().regex(/^\d{5,25}$/), enabled: z.boolean() }),
-  z.object({ action: z.literal('video-create'), title: z.string().min(1).max(180), description: z.string().max(4000).default('') }),
+  z.object({ action: z.literal('video-create'), operationId: z.string().uuid(), videoId: z.string().uuid(), title: z.string().min(1).max(180), description: z.string().max(4000).default('') }),
+  z.object({ action: z.literal('upload-review'), operationId: z.string().uuid() }),
   z.object({ action: z.literal('video-update'), videoId: z.string().uuid(), title: z.string().min(1).max(180), description: z.string().max(4000), thumbnailUrl: z.string().url().nullable().optional(), published: z.boolean(), sortOrder: z.number().int() }),
   z.object({ action: z.literal('video-delete'), videoId: z.string().uuid() }),
   z.object({ action: z.literal('progress-reset'), userId: z.string().uuid(), videoId: z.string().uuid() }),
@@ -92,6 +94,28 @@ async function handleAdminPost(request: Request, correlationId: string) {
   const input = parsed.data
   let result: any = { ok: true }
 
+  if (input.action === 'upload-review') {
+    const { data: intent, error } = await adminDb.from('adp_upload_intents')
+      .select('video_id,state,mux_upload_id').eq('operation_id', input.operationId).maybeSingle()
+    if (error) return NextResponse.json({ error: 'upload_requires_reconciliation' }, { status: 503 })
+    if (!intent) return NextResponse.json({ error: 'not_found' }, { status: 404 })
+    if (!process.env.MUX_TOKEN_ID || !process.env.MUX_TOKEN_SECRET) return NextResponse.json({ error: 'mux_credentials_missing' }, { status: 503 })
+    const { mux } = await import('@/lib/mux')
+    let matches = 0, inspected = 0
+    try {
+      // SDK auto-pagination is exhaustive. Do not infer absence from one page.
+      for await (const upload of mux.video.uploads.list({ limit: 100 })) {
+        if (++inspected > 10000) throw Error('provider inventory exceeds review bound')
+        if (upload.new_asset_settings?.passthrough === intent.video_id) matches++
+      }
+    } catch {
+      return NextResponse.json({ error: 'upload_requires_reconciliation' }, { status: 503 })
+    }
+    return NextResponse.json({ ok: true, videoId: intent.video_id, state: intent.state,
+      providerMatches: matches, boundUploadPresent: Boolean(intent.mux_upload_id),
+      manualReviewRequired: matches !== 1 || !['waiting','asset_created'].includes(intent.state) })
+  }
+
   if (input.action === 'mux-sync') {
     // This write path is opt-in separately from both dashboard access and playback.
     // It stays closed unless an administrator explicitly enables it after approval.
@@ -115,8 +139,27 @@ async function handleAdminPost(request: Request, correlationId: string) {
     if (!video?.mux_upload_id) return NextResponse.json({ error: 'mux_upload_missing' }, { status: 404 })
     if (video.duration_precision_verified) return NextResponse.json({ error: 'metadata_already_verified' }, { status: 409 })
     const { mux } = await import('@/lib/mux')
+    const { data: intent, error: intentError } = await adminDb.from('adp_upload_intents')
+      .select('operation_id,video_id,mux_upload_id').eq('video_id', input.videoId).maybeSingle()
+    if (intentError) return NextResponse.json({ error: 'upload_requires_reconciliation' }, { status: 503 })
+    if (intent) {
+      const providerUpload = await mux.video.uploads.retrieve(video.mux_upload_id).catch(() => null)
+      if (intent.video_id !== input.videoId || intent.mux_upload_id !== video.mux_upload_id ||
+          providerUpload?.id !== video.mux_upload_id || providerUpload?.new_asset_settings?.passthrough !== input.videoId) {
+        return NextResponse.json({ error: 'upload_requires_reconciliation' }, { status: 409 })
+      }
+    }
     const syncResult = await syncMuxUpload(video.mux_upload_id, { mux, adminDb, correlationId })
     if (syncResult.verified) {
+      if (intent) {
+        const client = await createClient()
+        const finalized = await client.rpc('adp_finalize_upload_intent_qc026', { p_video_id: input.videoId })
+        if (finalized.error || finalized.data !== true) {
+          console.error('[ADP admin] Upload metadata saved but intent finalization requires review',
+            { correlationId, errorId: 'ADP-ADM-019', databaseCode: finalized.error?.code ?? null })
+          return NextResponse.json({ error: 'upload_requires_reconciliation' }, { status: 503 })
+        }
+      }
       const { error: auditError } = await adminDb.from('admin_audit_log').insert({
         admin_id: member.id, action: 'mux-sync', details: { videoId: input.videoId, verified: true },
       })
@@ -144,21 +187,56 @@ async function handleAdminPost(request: Request, correlationId: string) {
   }
   if (input.action === 'video-create') {
     if (!process.env.MUX_TOKEN_ID || !process.env.MUX_TOKEN_SECRET) return NextResponse.json({ error: 'mux_credentials_missing' }, { status: 503 })
-    const { mux } = await import('@/lib/mux')
-    const videoId = randomUUID()
-    let upload
+    const client = await createClient()
+    const payloadHash = createHash('sha256').update(JSON.stringify([input.title, input.description])).digest('hex')
+    const operation = { operationId: input.operationId, videoId: input.videoId, actorId: member.id, payloadHash,
+      title: input.title, description: input.description }
+    // The authenticated RPC reserves both the unpublished video and intent in
+    // one transaction. No provider request is allowed before that succeeds.
+    const ledger = {
+      async reserve() {
+        const { data, error } = await client.rpc('adp_reserve_upload_intent_qc026', {
+          p_operation_id: input.operationId, p_video_id: input.videoId, p_request_hash: payloadHash,
+          p_title: input.title, p_description: input.description,
+        })
+        if (error) throw error
+        return data
+      },
+      async claim() {
+        const { data, error } = await client.rpc('adp_claim_upload_intent_qc026', { p_operation_id: input.operationId })
+        if (error) throw error
+        return data === true
+      },
+      async setTarget(_row: unknown, upload: { id: string; url: string; expiresAt: string }) {
+        const { data, error } = await client.rpc('adp_bind_upload_intent_qc026', {
+          p_operation_id: input.operationId, p_upload_id: upload.id,
+          p_upload_url: upload.url, p_expires_at: upload.expiresAt,
+        })
+        if (error || data !== true) throw error ?? Error('upload binding rejected')
+      },
+      async markReview() {
+        const { error } = await client.rpc('adp_mark_upload_review_qc026', { p_operation_id: input.operationId })
+        if (error) throw error
+      },
+    }
     try {
-      upload = await mux.video.uploads.create({ cors_origin: new URL(request.url).origin, new_asset_settings: { playback_policies: ['signed'], video_quality: 'basic', passthrough: videoId } })
+      const { mux } = await import('@/lib/mux')
+      const target = await createOrResumeUpload({ ledger, mux: {
+        async create(videoId: string) {
+          const upload = await mux.video.uploads.create({ cors_origin: new URL(request.url).origin,
+            timeout: 3600, new_asset_settings: { playback_policies: ['signed'], video_quality: 'basic', passthrough: videoId } })
+          if (!upload?.id || !upload.url) throw Error('provider response incomplete')
+          return { id: upload.id, url: upload.url, expiresAt: new Date(Date.now() + 3540_000).toISOString() }
+        },
+      } }, operation)
+      if (target.action !== 'reuse') return NextResponse.json({ error: 'upload_requires_reconciliation' }, { status: 409 })
+      return NextResponse.json({ ok: true, videoId: target.videoId, uploadId: target.uploadId, uploadUrl: target.uploadUrl })
     } catch (error) {
-      console.error('[ADP admin] Mux upload creation failed', { correlationId, errorId: 'ADP-ADM-007', providerStatus: (error as { status?: number })?.status ?? null })
-      return NextResponse.json({ error: 'mux_upload_creation_failed' }, { status: 502 })
+      const databaseCode = (error as { code?: string })?.code ?? null
+      const conflict = databaseCode === '23505' || (error as Error)?.message === 'upload intent conflict'
+      console.error('[ADP admin] Upload intent unavailable', { correlationId, errorId: 'ADP-ADM-008', databaseCode })
+      return NextResponse.json({ error: conflict ? 'upload_intent_conflict' : 'upload_requires_reconciliation' }, { status: conflict ? 409 : 503 })
     }
-    const { error } = await adminDb.from('videos').insert({ id: videoId, title: input.title, description: input.description, published: false, sort_order: 999, mux_upload_id: upload.id, duration_seconds: 0 })
-    if (error) {
-      console.error('[ADP admin] Video record insert failed after Mux upload creation', { correlationId, errorId: 'ADP-ADM-008', databaseCode: error.code ?? null })
-      return NextResponse.json({ error: 'video_record_create_failed', databaseCode: error.code || null }, { status: 503 })
-    }
-    result = { ok: true, videoId, uploadId: upload.id, uploadUrl: upload.url }
   }
   if (input.action === 'video-update') {
     if (input.published) {
@@ -187,7 +265,10 @@ async function handleAdminPost(request: Request, correlationId: string) {
   if (input.action === 'progress-reset' || input.action === 'progress-complete') {
     const client = await createClient()
     const { data, error } = await client.rpc('adp_admin_progress', {p_user_id:input.userId,p_video_id:input.videoId,p_action:input.action})
-    if (error) return NextResponse.json({error:error.message}, {status:400})
+    if (error) {
+      console.error('[ADP admin] progress RPC failed', { correlationId, errorId: 'ADP-ADM-020', databaseCode: error.code ?? null })
+      return NextResponse.json({ error: 'admin_progress_unavailable' }, { status: 503 })
+    }
     return NextResponse.json(data)
   }
   const { error: auditError } = await adminDb.from('admin_audit_log').insert({ admin_id: member.id, action: input.action, details: input })

@@ -7,6 +7,16 @@ type View = 'profiles' | 'allowed' | 'videos' | 'progress' | 'historical' | 'ver
 type Page = { rows: any[]; nextCursor: string | null; cursor: string | null; previous: (string | null)[]; loading: boolean; error: string | null }
 const blank = (): Page => ({ rows: [], nextCursor: null, cursor: null, previous: [], loading: false, error: null })
 const names: View[] = ['profiles', 'allowed', 'videos', 'progress', 'historical', 'verified']
+const uploadOperationKey = 'adp:pending-upload-operation'
+function uploadOperation() {
+  try {
+    const stored = JSON.parse(sessionStorage.getItem(uploadOperationKey) || 'null')
+    if (stored?.operationId && stored?.videoId) return stored as { operationId: string; videoId: string }
+  } catch { /* A corrupt browser entry is replaced with a new operation. */ }
+  const operation = { operationId: crypto.randomUUID(), videoId: crypto.randomUUID() }
+  sessionStorage.setItem(uploadOperationKey, JSON.stringify(operation))
+  return operation
+}
 
 function CompletionRows({ rows }: { rows: any[] }) {
   return <div className="table-wrap"><table><thead><tr><th scope="col">Member</th><th scope="col">Video</th><th scope="col">Evidence</th><th scope="col">Recorded</th><th scope="col">Progress row</th></tr></thead><tbody>{rows.map((row, index) => <tr key={`${row.userId}-${row.videoId}-${index}`}><td>{row.username}</td><td>{row.title}</td><td>{row.status}</td><td>{row.completedAt ? new Date(row.completedAt).toLocaleString() : '—'}</td><td>{row.hasProgress ? 'Present' : 'No progress record'}</td></tr>)}</tbody></table></div>
@@ -16,6 +26,7 @@ export function PagedAdminDashboard() {
   const [tab, setTab] = useState<'users' | 'videos' | 'progress'>('users')
   const [pages, setPages] = useState<Record<View, Page>>(() => Object.fromEntries(names.map(name => [name, blank()])) as Record<View, Page>)
   const [notice, setNotice] = useState(''), [busy, setBusy] = useState(false)
+  const [reviewPending, setReviewPending] = useState(false)
   const [pending, setPending] = useState<{ uploadUrl: string; file: File; videoId: string } | null>(null)
   const generations = useRef<Record<View, number>>({ profiles: 0, allowed: 0, videos: 0, progress: 0, historical: 0, verified: 0 })
 
@@ -33,7 +44,7 @@ export function PagedAdminDashboard() {
       if (generation === generations.current[view]) setPages(current => ({ ...current, [view]: { ...current[view], loading: false, error: error instanceof Error ? error.message : 'Page unavailable.' } }))
     }
   }
-  useEffect(() => { void load('profiles'); void load('allowed') }, [])
+  useEffect(() => { void load('profiles'); void load('allowed'); setReviewPending(Boolean(sessionStorage.getItem(uploadOperationKey))) }, [])
   function select(next: typeof tab) { setTab(next); if (next === 'progress') { void load('progress'); void load('historical'); void load('verified') } else if (next === 'videos') void load('videos') }
   function controls(view: View) {
     const page = pages[view]
@@ -49,15 +60,20 @@ export function PagedAdminDashboard() {
       const response = await fetch('/api/admin', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input) })
       const data: any = await response.json().catch(() => ({}))
       if (!response.ok) throw Error(adminMutationMessage(input.action, data, response.status))
+      if (input.action === 'upload-review') {
+        setNotice(`Upload state: ${data.state}. Provider matches: ${data.providerMatches}. ${data.manualReviewRequired ? 'Manual reconciliation is required.' : 'The saved target can be retried with the original video file.'}`)
+        return true
+      }
       if (data.uploadUrl) {
         if (!file) throw Error('Choose a video file first.')
         const target = { uploadUrl: data.uploadUrl as string, videoId: data.videoId as string, file }
         setPending(target); await transferExistingUpload(target); setPending(null)
+        sessionStorage.removeItem(uploadOperationKey); setReviewPending(false)
       }
       setNotice(input.action === 'progress-complete' ? 'Historical completion recorded.' : 'Saved. Reloaded the affected page.')
       await Promise.all((input.action === 'access' ? ['allowed', 'profiles'] as View[] : input.action.startsWith('progress-') ? ['progress', 'historical', 'verified'] as View[] : ['videos'] as View[]).map(view => load(view)))
       return true
-    } catch (error) { setNotice(error instanceof Error ? error.message : 'Operation failed.'); return false }
+    } catch (error) { if (input.action === 'video-create') setReviewPending(true); setNotice(error instanceof Error ? error.message : 'Operation failed.'); return false }
     finally { setBusy(false) }
   }
   const canPublish = (video: any) => Boolean(video.playback_id && Number(video.duration_seconds) > 0 && video.duration_precision_verified)
@@ -70,8 +86,8 @@ export function PagedAdminDashboard() {
       <div className="panel"><h2>Registered members</h2>{controls('profiles')}{!pages.profiles.rows.length && !pages.profiles.loading && !pages.profiles.error ? <p className="sub">No members on this page.</p> : <div className="table-wrap"><table><thead><tr><th scope="col">Member</th><th scope="col">Discord ID</th><th scope="col">Last activity</th><th scope="col">Access</th><th scope="col">Action</th></tr></thead><tbody>{pages.profiles.rows.map(row => <tr key={row.id}><td>{row.username}</td><td>{row.discord_id}</td><td>{row.last_seen_at ? new Date(row.last_seen_at).toLocaleString() : '—'}</td><td>{row.isAuthorized ? 'Authorized' : 'Denied'}</td><td>{row.isAuthorized && <button type="button" className="button danger" disabled={busy} onClick={() => void act({ action: 'access', discordId: row.discord_id, enabled: false })}>Remove</button>}</td></tr>)}</tbody></table></div>}</div>
     </>}
     {tab === 'videos' && <>
-      <div className="panel"><h2>Upload a training video</h2>{pending && <div className="notice" role="status">The existing upload target is pending. <button type="button" className="button secondary" disabled={busy} onClick={() => { setBusy(true); void transferExistingUpload(pending).then(() => { setPending(null); setNotice('Upload received.'); void load('videos') }).catch(error => setNotice(error instanceof Error ? error.message : 'Transfer failed.')).finally(() => setBusy(false)) }}>Retry file transfer</button></div>}
-        <form className="form-grid" onSubmit={event => { event.preventDefault(); const form = event.currentTarget, values = new FormData(form), file = form.querySelector<HTMLInputElement>('#video-file')?.files?.[0]; if (!file) { setNotice('Choose a video file.'); return } void act({ action: 'video-create', title: values.get('title'), description: values.get('description') }, file).then(saved => { if (saved) form.reset() }) }}><input name="title" className="field" aria-label="Video title" placeholder="Video title" required /><input type="file" id="video-file" className="field" aria-label="Video file" accept="video/*" required /><textarea name="description" className="field" aria-label="Video description" placeholder="Description" /><button className="button" disabled={busy || Boolean(pending)}>Upload to Mux</button></form></div>
+      <div className="panel"><h2>Upload a training video</h2>{reviewPending && <div className="notice" role="status">An upload operation is pending. <button type="button" className="button secondary" disabled={busy} onClick={() => { const operation = uploadOperation(); void act({ action: 'upload-review', operationId: operation.operationId }) }}>Review upload state</button></div>}{pending && <div className="notice" role="status">The existing upload target is pending. <button type="button" className="button secondary" disabled={busy} onClick={() => { setBusy(true); void transferExistingUpload(pending).then(() => { setPending(null); sessionStorage.removeItem(uploadOperationKey); setReviewPending(false); setNotice('Upload received.'); void load('videos') }).catch(error => setNotice(error instanceof Error ? error.message : 'Transfer failed.')).finally(() => setBusy(false)) }}>Retry file transfer</button></div>}
+        <form className="form-grid" onSubmit={event => { event.preventDefault(); const form = event.currentTarget, values = new FormData(form), file = form.querySelector<HTMLInputElement>('#video-file')?.files?.[0]; if (!file) { setNotice('Choose a video file.'); return } void act({ action: 'video-create', ...uploadOperation(), title: values.get('title'), description: values.get('description') }, file).then(saved => { if (saved) form.reset() }) }}><input name="title" className="field" aria-label="Video title" placeholder="Video title" required /><input type="file" id="video-file" className="field" aria-label="Video file" accept="video/*" required /><textarea name="description" className="field" aria-label="Video description" placeholder="Description" /><button className="button" disabled={busy || Boolean(pending)}>Upload to Mux</button></form></div>
       {controls('videos')}{!pages.videos.rows.length && !pages.videos.loading && !pages.videos.error && <p className="sub">No videos on this page.</p>}
       {pages.videos.rows.map(video => <form key={video.id} className="panel form-grid" onSubmit={event => { event.preventDefault(); const values = new FormData(event.currentTarget); void act({ action: 'video-update', videoId: video.id, title: values.get('title'), description: values.get('description'), thumbnailUrl: values.get('thumbnailUrl') || null, published: values.get('published') === 'on', sortOrder: Number(values.get('sortOrder')) }) }}><input name="title" className="field" aria-label={`Title for ${video.title}`} defaultValue={video.title} required /><input name="sortOrder" className="field" aria-label={`Sort order for ${video.title}`} type="number" defaultValue={video.sort_order} /><textarea name="description" className="field" aria-label={`Description for ${video.title}`} defaultValue={video.description} /><input name="thumbnailUrl" className="field" aria-label={`Thumbnail URL for ${video.title}`} defaultValue={video.thumbnail_url || ''} /><label className="row"><input name="published" type="checkbox" defaultChecked={video.published} disabled={!canPublish(video) && !video.published} /> Published · {canPublish(video) ? 'Mux metadata verified' : 'Mux metadata pending verification'}</label><div className="row"><button className="button" disabled={busy}>Save video</button>{video.mux_upload_id && !video.duration_precision_verified && <button type="button" className="button secondary" disabled={busy} onClick={() => confirm('Synchronize this video’s Mux metadata and reconcile progress?') && void act({ action: 'mux-sync', videoId: video.id })}>Sync Mux metadata</button>}<span className="sub">Unpublish to remove from the library while retaining training history.</span></div></form>)}
     </>}
