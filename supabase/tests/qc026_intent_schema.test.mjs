@@ -1,0 +1,26 @@
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+
+test('QC-026 isolated ledger has unique idempotency identity and no client URL access', () => {
+  const sql = fs.readFileSync('supabase/batch3/qc026_upload_intents_candidate.sql', 'utf8')
+  assert.match(sql, /operation_id uuid primary key/)
+  assert.match(sql, /video_id uuid not null unique/)
+  assert.match(sql, /mux_upload_id text unique/)
+  assert.match(sql, /enable row level security/)
+  assert.match(sql, /revoke all on public\.adp_upload_intents from public,anon,authenticated/)
+  assert.match(sql, /on delete restrict/g)
+  assert.doesNotMatch(sql, /delete from|grant.*authenticated/)
+  assert.match(sql, /create trigger adp_upload_intent_immutable/)
+  assert.match(sql, /old\.operation_id is distinct from new\.operation_id/)
+  assert.match(sql, /old\.actor_id is distinct from new\.actor_id/)
+  assert.match(sql, /old\.video_id is distinct from new\.video_id/)
+  assert.match(sql, /mux_asset_id text/)
+  assert.match(sql, /signed_playback_id text/)
+  assert.match(sql, /from public\.videos where id=new\.video_id for share/)
+  assert.match(sql, /v\.mux_upload_id is distinct from new\.mux_upload_id/)
+  assert.match(sql, /v\.asset_id is distinct from new\.mux_asset_id/)
+  assert.match(sql, /v\.playback_id is distinct from new\.signed_playback_id/)
+  assert.match(sql, /before insert or update on public\.adp_upload_intents/)
+  assert.match(sql, /if tg_op='INSERT' then/)
+})
