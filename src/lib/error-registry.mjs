@@ -34,6 +34,7 @@ const entries = Object.freeze({
   upload_intent_conflict: ['ADP-ADM-018', 409, 'This upload attempt changed. Review the pending upload before starting another.'],
   upload_requires_reconciliation: ['ADP-ADM-019', 503, 'The upload state is uncertain. Ask an administrator to review it before retrying.'],
   admin_progress_unavailable: ['ADP-ADM-020', 503, 'The progress action could not be confirmed. Reload before trying again.'],
+  uploads_disabled: ['ADP-ADM-021', 503, 'New video uploads are temporarily disabled.'],
   admin_unavailable: ['ADP-ADM-099', 503, 'The administrator operation could not be completed.'],
 })
 
@@ -47,3 +48,4 @@ export function sanitizeApiError(code, correlationId, _untrusted = null) {
   const { errorId, message } = identifyError(known)
   return { error: known, errorId, correlationId, reason: message }
 }
+

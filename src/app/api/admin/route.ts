@@ -9,6 +9,7 @@ import { assertDashboardSize, collectPages } from '@/lib/admin-pages.mjs'
 import { identifyError, sanitizeApiError } from '@/lib/error-registry.mjs'
 import { sameOriginMutation } from '@/lib/api-errors.mjs'
 import { createOrResumeUpload } from '@/lib/upload-lifecycle.mjs'
+import { uploadsEnabled } from '@/lib/upload-gate.mjs'
 
 const privateHeaders = { 'Cache-Control': 'private, no-store, max-age=0', 'X-Content-Type-Options': 'nosniff' }
 
@@ -92,6 +93,9 @@ async function handleAdminPost(request: Request, correlationId: string) {
   const parsed = schema.safeParse(await request.json().catch(() => null))
   if (!parsed.success) return NextResponse.json({ error: 'invalid_request', details: parsed.error.flatten() }, { status: 400 })
   const input = parsed.data
+  if ((input.action === 'video-create' || input.action === 'upload-review') && !uploadsEnabled()) {
+    return NextResponse.json({ error: 'uploads_disabled' }, { status: 503 })
+  }
   let result: any = { ok: true }
 
   if (input.action === 'upload-review') {
@@ -276,3 +280,4 @@ async function handleAdminPost(request: Request, correlationId: string) {
   if (auditError) console.error('[ADP admin] audit log write failed', { correlationId, errorId: 'ADP-ADM-099', action: input.action, databaseCode: auditError.code ?? null })
   return NextResponse.json(result)
 }
+

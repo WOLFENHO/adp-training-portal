@@ -14,6 +14,7 @@ function route(file,ready){
  id==='@/lib/api-errors.mjs'?{sameOriginMutation:()=>true,safeSessionRpcError:()=>({status:503,code:'session_unavailable',errorId:'ADP-PRG-004'}),sanitizeHeartbeatRejection:()=>({accepted:false,code:'heartbeat_rejected'})}:
  id==='@/lib/mux-duration-sync.mjs'?{syncMuxUpload:()=>{throw Error('Unexpected Mux sync')}}:
  id==='@/lib/upload-lifecycle.mjs'?{createOrResumeUpload:()=>{throw Error('Unexpected upload')}}:
+ id==='@/lib/upload-gate.mjs'?{uploadsEnabled:()=>false}:
  id==='@/lib/admin-pages.mjs'?{collectPages:()=>{throw Error('Unexpected dashboard read')}}:
  id==='@/lib/error-registry.mjs'?{identifyError:()=>({status:503,errorId:'ADP-ADM-099'}),sanitizeApiError:(code)=>({error:code})}:require(id)
  function evaluate(path) {
@@ -56,3 +57,4 @@ test('admin metadata sync stays disabled independently of playback', async () =>
   else process.env.MUX_METADATA_SYNC_ENABLED = previous
  }
 })
+

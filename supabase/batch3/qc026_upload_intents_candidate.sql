@@ -62,7 +62,7 @@ begin
   new.updated_at:=clock_timestamp();
   return new;
 end $$;
-revoke all on function public.adp_upload_intent_guard_qc026() from public,anon,authenticated;
+revoke all on function public.adp_upload_intent_guard_qc026() from public,anon,authenticated,service_role;
 create trigger adp_upload_intent_immutable before insert or update on public.adp_upload_intents
 for each row execute function public.adp_upload_intent_guard_qc026();
 alter table public.adp_upload_intents enable row level security;
@@ -175,8 +175,8 @@ begin
   return true;
 end $$;
 
-revoke all on function public.adp_upload_actor_authorized_qc026(uuid),
-  public.adp_reserve_upload_intent_qc026(uuid,uuid,uuid,text,text,text),
+revoke all on function public.adp_upload_actor_authorized_qc026(uuid) from public,anon,authenticated,service_role;
+revoke all on function public.adp_reserve_upload_intent_qc026(uuid,uuid,uuid,text,text,text),
   public.adp_claim_upload_intent_qc026(uuid,uuid),public.adp_bind_upload_intent_qc026(uuid,uuid,text,text,timestamptz),
   public.adp_mark_upload_review_qc026(uuid,uuid),public.adp_finalize_upload_intent_qc026(uuid,uuid)
   from public,anon,authenticated;
@@ -185,3 +185,4 @@ grant execute on function public.adp_reserve_upload_intent_qc026(uuid,uuid,uuid,
   public.adp_mark_upload_review_qc026(uuid,uuid),public.adp_finalize_upload_intent_qc026(uuid,uuid)
   to service_role;
 commit;
+

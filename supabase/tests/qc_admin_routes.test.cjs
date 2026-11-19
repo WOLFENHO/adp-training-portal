@@ -24,6 +24,8 @@ function admin(db, mux = {}, client = {}, currentMember = member) {
     '@/lib/error-registry.mjs': appRequire('./src/lib/error-registry.mjs'),
     '@/lib/api-errors.mjs': appRequire('./src/lib/api-errors.mjs'),
     '@/lib/upload-lifecycle.mjs': appRequire('./src/lib/upload-lifecycle.mjs'),
+    // Exercise the dormant implementation without opening the deployed gate.
+    '@/lib/upload-gate.mjs': { uploadsEnabled: () => true },
     '@/lib/mux': { mux },
   })
 }
@@ -240,3 +242,4 @@ test('QC-026 unauthorized caller cannot reserve or obtain a signed upload URL', 
   assert.equal(calls, 0)
   assert.doesNotMatch(await response.text(), /uploadUrl|provider invocation|privileged invocation/)
 })
+
