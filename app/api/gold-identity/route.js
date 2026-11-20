@@ -22,6 +22,15 @@ function tokenMatches(actual, expected) {
   return a.length === b.length && timingSafeEqual(a, b)
 }
 
+function dataApiFailureCode(status) {
+  if (status === 401) return 'ADP-GOLD-PROBE-HTTP-401'
+  if (status === 403) return 'ADP-GOLD-PROBE-HTTP-403'
+  if (status === 404) return 'ADP-GOLD-PROBE-HTTP-404'
+  if (status >= 400 && status < 500) return 'ADP-GOLD-PROBE-HTTP-4XX'
+  if (status >= 500 && status < 600) return 'ADP-GOLD-PROBE-HTTP-5XX'
+  return 'ADP-GOLD-PROBE-HTTP-UNEXPECTED'
+}
+
 export async function GET(request) {
   const env = process.env
   const until = Date.parse(env.ADP_GOLD_PROBE_UNTIL ?? '')
@@ -48,7 +57,7 @@ export async function GET(request) {
         Accept: 'application/json',
       },
     })
-    if (!response.ok) return answer(503, 'ADP-GOLD-PROBE-KEY-REJECTED')
+    if (!response.ok) return answer(503, dataApiFailureCode(response.status))
     const rows = await response.json()
     return Array.isArray(rows) && rows.length === 1 && rows[0].version === 121 && rows[0].ready === true
       ? answer(200, 'ADP-GOLD-PROBE-OK') : answer(503, 'ADP-GOLD-PROBE-READINESS')
