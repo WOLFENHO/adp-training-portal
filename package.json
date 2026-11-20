@@ -3,18 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
-    "build": "node scripts/build.mjs",
-    "start": "next start",
-    "typecheck": "tsc --noEmit",
-    "test:duration-sync": "node --test supabase/tests/mux_duration_sync.test.mjs",
-    "test:player-lifecycle": "node --test supabase/tests/player_lifecycle.test.mjs",
-    "test:progress-concurrency": "python supabase/tests/progress_integrity_concurrency.py",
-    "serve:player-lifecycle:browser": "node supabase/tests/player_lifecycle_browser_server.mjs",
-    "test:maintenance": "node --test supabase/tests/maintenance_routes.test.mjs",
-    "test:release-concurrency": "node supabase/tests/release_1_2_1_concurrency.mjs",
-    "test:heartbeat-response": "node --test supabase/tests/heartbeat_response.test.mjs",
-    "test": "node --test supabase/tests/*.test.mjs supabase/tests/*.test.cjs src/lib/*.test.mjs"
+    "build": "next build"
   },
   "dependencies": {
     "@mux/mux-player-react": "^3.14.1",

@@ -1,4 +1,0 @@
-export type UploadIntent = { operationId: string; actorId: string; payloadHash: string; videoId: string; status: string; uploadId: string | null; uploadUrl: string | null; expiresAt: string }
-export function planUploadOperation(existing: UploadIntent | null, request: { operationId: string; actorId: string; payloadHash: string }, now?: Date): { action: string; videoId?: string; uploadId?: string | null; uploadUrl?: string }
-export function reconcileUploadCandidates(videoId: string, uploads: { id: string; status: string; new_asset_settings?: { passthrough?: string } }[]): { action: string; uploadId?: string }
-export function findOrphanUploads(uploads: { id: string; status: string; new_asset_settings?: { passthrough?: string } }[], recordedVideoIds: Set<string>): { uploadId: string; videoId: string; status: string }[]
