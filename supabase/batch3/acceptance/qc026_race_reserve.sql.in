@@ -1,0 +1,14 @@
+-- Submit this complete transaction on each of TWO independent connections.
+-- Replace only the three reviewed disposable UUID placeholders and HOLD_SECONDS.
+-- Run one copy with HOLD_SECONDS=4 and the other with HOLD_SECONDS=0.
+begin;
+set local lock_timeout='8s';
+set local statement_timeout='20s';
+set local role service_role;
+select 'race_start', pg_backend_pid(), clock_timestamp();
+select pg_backend_pid() as backend_pid,
+  public.adp_reserve_upload_intent_qc026(
+    '{{ACTOR_UUID}}'::uuid,'{{OPERATION_UUID}}'::uuid,'{{VIDEO_UUID}}'::uuid,
+    repeat('a',64),'QC-026 disposable race','') as reserved;
+select pg_sleep({{HOLD_SECONDS}});
+commit;

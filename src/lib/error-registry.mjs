@@ -15,6 +15,7 @@ const entries = Object.freeze({
   heartbeat_unavailable: ['ADP-PRG-006', 503, 'Progress could not be confirmed. Retry the request.'],
   playback_signing_unavailable: ['ADP-PRG-007', 503, 'A playback token could not be issued. Try again.'],
   video_unavailable: ['ADP-PRG-008', 503, 'The video is temporarily unavailable.'],
+  training_locked: ['ADP-PRG-011', 403, 'Complete earlier training modules first.'],
   admin_data_unavailable: ['ADP-ADM-002', 503, 'Administration data could not be loaded. Try again.'],
   video_delete_disabled: ['ADP-ADM-003', 409, 'Unpublish the video to retain training history.'],
   video_not_found: ['ADP-ADM-004', 404, 'The video record was not found.'],

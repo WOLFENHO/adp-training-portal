@@ -66,7 +66,7 @@ revoke all on function public.adp_upload_intent_guard_qc026() from public,anon,a
 create trigger adp_upload_intent_immutable before insert or update on public.adp_upload_intents
 for each row execute function public.adp_upload_intent_guard_qc026();
 alter table public.adp_upload_intents enable row level security;
-revoke all on public.adp_upload_intents from public,anon,authenticated;
+revoke all on public.adp_upload_intents from public,anon,authenticated,service_role;
 -- No client role may read the signed upload URL. Server-side service-role access
 -- requires a separate isolated authorization and transaction review.
 grant select,insert,update on public.adp_upload_intents to service_role;

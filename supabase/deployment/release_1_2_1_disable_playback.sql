@@ -18,6 +18,9 @@ declare
     'public.record_playback_heartbeat_r11(uuid,uuid,bigint,bigint,numeric,boolean,text)',
     'public.start_playback_session_r12(uuid)',
     'public.record_playback_heartbeat_r12(uuid,uuid,bigint,bigint,numeric,boolean,text)'
+    ,'public.adp_training_unlocked_r121(uuid)'
+    ,'public.adp_training_start_session_r121(uuid)'
+    ,'public.adp_training_heartbeat_r121(uuid,uuid,bigint,bigint,numeric,boolean,text)'
   ];
 begin
   if to_regclass('public.adp_playback_control') is not null then

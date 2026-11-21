@@ -62,5 +62,6 @@ test('completion requires the exact current asset identity and excludes reset/un
   const result=summarizeVideoProgress(video,null,[{...row,...variation}],[])
   assert.equal(result.currentVerified,false);assert.equal(result.status,'historical_completed')
  }
- assert.equal(summarizeVideoProgress(video,null,[{...row,asset_identity:'asset-a:100.000:12'}],[]).currentVerified,true)
+ assert.equal(summarizeVideoProgress(video,null,[{...row,asset_identity:'asset-a:100.000:12'}],[]).currentVerified,false)
+ assert.equal(summarizeVideoProgress(video,null,[{...row,asset_identity:'asset-a:100.000:12',verified_at:'2026-01-01T00:00:00Z'}],[]).currentVerified,true)
 })

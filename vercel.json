@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "git": {
+    "deploymentEnabled": {
+      "audit/gold-local-candidate": false,
+      "recovery/gold-verified-20261121": false
+    }
+  }
+}

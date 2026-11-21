@@ -11,9 +11,11 @@ function route(file,ready){
  id==='@/lib/supabase/server'?{createClient:async()=>({rpc:async(name)=>{calls.push(name);return {data:ready,error:null}}})}:
  id==='@/lib/supabase/admin'?{adminDb:forbidden}:id==='@/lib/mux'?{mux:forbidden,playbackToken:()=>{throw Error('Unexpected playback token during maintenance')}}:
  id==='@/lib/playback-gate'?evaluate('src/lib/playback-gate.ts'):
+ id==='@/lib/training-access'?{trainingUnlocked:async()=>{throw Error('Unexpected progression check during maintenance')}}:
  id==='@/lib/api-errors.mjs'?{sameOriginMutation:()=>true,safeSessionRpcError:()=>({status:503,code:'session_unavailable',errorId:'ADP-PRG-004'}),sanitizeHeartbeatRejection:()=>({accepted:false,code:'heartbeat_rejected'})}:
  id==='@/lib/mux-duration-sync.mjs'?{syncMuxUpload:()=>{throw Error('Unexpected Mux sync')}}:
  id==='@/lib/upload-lifecycle.mjs'?{createOrResumeUpload:()=>{throw Error('Unexpected upload')}}:
+ id==='@/lib/upload-intent.mjs'?{planRecoveredUpload:()=>{throw Error('Unexpected upload recovery')}}:
  id==='@/lib/upload-gate.mjs'?{uploadsEnabled:()=>false}:
  id==='@/lib/admin-pages.mjs'?{collectPages:()=>{throw Error('Unexpected dashboard read')}}:
  id==='@/lib/error-registry.mjs'?{identifyError:()=>({status:503,errorId:'ADP-ADM-099'}),sanitizeApiError:(code)=>({error:code})}:require(id)

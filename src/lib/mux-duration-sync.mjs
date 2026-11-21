@@ -45,3 +45,23 @@ export async function syncMuxUpload(uploadId, { mux, adminDb, correlationId = ra
     return { uploadId, status: asset.status, ready: true, verified: false, reason: 'The verified duration could not be saved to the database.' }
   }
 }
+
+/** First-time upload verification is confined to the original unpublished,
+ * history-free intent by the database RPC. Mux identity is checked again here. */
+export async function verifyNewMuxUpload({ videoId, uploadId, actorId }, { mux, adminDb }) {
+  try {
+    const upload = await mux.video.uploads.retrieve(uploadId)
+    if (upload?.id !== uploadId || upload.status !== 'asset_created' ||
+        upload.new_asset_settings?.passthrough !== videoId || !upload.asset_id) return { verified: false }
+    const asset = await mux.video.assets.retrieve(upload.asset_id)
+    if (asset?.id !== upload.asset_id || asset.status !== 'ready') return { verified: false }
+    const playback = asset.playback_ids?.filter(item => item.policy === 'signed') ?? []
+    const duration = Number(asset.duration)
+    if (playback.length !== 1 || !playback[0]?.id || !Number.isFinite(duration) || duration <= 0) return { verified: false }
+    const { data, error } = await adminDb.rpc('adp_verify_new_upload_qc026', {
+      p_actor_id: actorId, p_video_id: videoId, p_upload_id: uploadId,
+      p_asset_id: asset.id, p_playback_id: playback[0].id, p_duration: duration,
+    })
+    return { verified: !error && data === true }
+  } catch { return { verified: false } }
+}

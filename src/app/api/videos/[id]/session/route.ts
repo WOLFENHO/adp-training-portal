@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { getMember } from '@/lib/auth'
 import { createClient } from '@/lib/supabase/server'
 import { safeSessionRpcError, sameOriginMutation } from '@/lib/api-errors.mjs'
+import { trainingUnlocked } from '@/lib/training-access'
 
 const headers = { 'Cache-Control': 'private, no-store, max-age=0', 'X-Content-Type-Options': 'nosniff' }
 
@@ -30,7 +31,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
       console.error('[ADP playback] session release unavailable', { correlationId, errorId: 'ADP-PRG-005', databaseCode: releaseError?.code ?? null })
       return fail(503, 'playback_schema_unavailable', 'ADP-PRG-005', 'Verified playback is temporarily unavailable.')
     }
-    const { data, error } = await supabase.rpc('start_playback_session_r12', { p_video_id: id })
+    if (!await trainingUnlocked(id)) return fail(403, 'training_locked', 'ADP-PRG-011', 'Complete earlier training modules first.')
+    const { data, error } = await supabase.rpc('adp_training_start_session_r121', { p_video_id: id })
     if (error) {
       const mapped = safeSessionRpcError(error)
       console.error('[ADP playback] session creation rejected', { correlationId, errorId: mapped.errorId, databaseCode: error.code ?? null })

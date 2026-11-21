@@ -1,0 +1,75 @@
+-- ADP-Rehearsal only. Replace every placeholder with reviewed disposable IDs.
+-- Stop if a provider target exists; reconcile its Mux resource separately.
+-- Auth users must be removed through the protected Auth administrator channel
+-- after this transaction. Existing Auth audit history and sequences remain.
+begin;
+set local lock_timeout='2s';
+set local statement_timeout='20s';
+do $$
+declare
+  actor uuid := '{{ACTOR_UUID}}'::uuid;
+  videos uuid[] := '{{VIDEO_UUID_ARRAY}}'::uuid[];
+  operations uuid[] := '{{OPERATION_UUID_ARRAY}}'::uuid[];
+  users uuid[] := '{{USER_UUID_ARRAY}}'::uuid[];
+  discords text[] := '{{DISCORD_ID_ARRAY}}'::text[];
+begin
+  if current_user <> 'postgres' or array_length(videos,1) is null or
+     array_length(operations,1) is null or array_length(users,1) is null or
+     array_length(discords,1) is null or not actor=any(users) or
+     (select count(distinct x) from unnest(videos) x)<>cardinality(videos) or
+     (select count(distinct x) from unnest(operations) x)<>cardinality(operations) or
+     (select count(*) from public.videos where id=any(videos))<>cardinality(videos) or
+     exists(select 1 from public.videos where id=any(videos) and
+       title not like 'QC-026 disposable%' and title not like 'ADP Gold disposable%') or
+     exists(select 1 from unnest(discords) d where d !~ '^(adp-gold-[a-z0-9-]+|[0-9]{16,22})$') or
+     not exists(select 1 from public.profiles where id=actor and discord_id=any(discords)) or
+     exists(select 1 from public.profiles where discord_id=any(discords) and id<>all(users)) or
+     exists(select 1 from public.profiles where id=any(users) and discord_id<>all(discords)) or
+     exists(select 1 from public.videos where id=any(videos) and
+       (published or mux_upload_id is not null or asset_id is not null or playback_id is not null)) or
+     exists(select 1 from public.adp_upload_intents where operation_id=any(operations) and
+       (actor_id<>actor or video_id<>all(videos) or mux_upload_id is not null or mux_asset_id is not null)) or
+     exists(select 1 from public.adp_upload_intents where video_id=any(videos) and operation_id<>all(operations)) or
+     exists(select 1 from public.user_video_progress where user_id=any(users) and video_id<>all(videos)) or
+     exists(select 1 from public.watched_intervals where user_id=any(users) and video_id<>all(videos)) or
+     exists(select 1 from public.playback_sessions where user_id=any(users) and video_id<>all(videos)) or
+     exists(select 1 from public.completion_records where user_id=any(users) and video_id<>all(videos)) or
+     exists(select 1 from public.verified_completion_records where user_id=any(users) and video_id<>all(videos)) or
+     exists(select 1 from public.user_video_progress where video_id=any(videos) and user_id<>all(users)) or
+     exists(select 1 from public.watched_intervals where video_id=any(videos) and user_id<>all(users)) or
+     exists(select 1 from public.playback_sessions where video_id=any(videos) and user_id<>all(users)) or
+     exists(select 1 from public.completion_records where video_id=any(videos) and user_id<>all(users)) or
+     exists(select 1 from public.verified_completion_records where video_id=any(videos) and user_id<>all(users)) or
+     exists(select 1 from public.admin_audit_log where admin_id=actor and
+       not (details->>'videoId'=any(videos::text[]) or
+            details->>'operationId'=any(operations::text[]))) or
+     exists(select 1 from public.admin_audit_log where admin_id is distinct from actor and
+       (details->>'videoId'=any(videos::text[]) or
+        details->>'operationId'=any(operations::text[]))) then
+    raise exception 'disposable fixture boundary failed; preserve rows and inspect';
+  end if;
+  delete from public.adp_upload_intents where operation_id=any(operations) and actor_id=actor;
+  delete from public.admin_audit_log where admin_id=actor and
+    (details->>'videoId'=any(videos::text[]) or
+     details->>'operationId'=any(operations::text[]));
+  -- Only the verified disposable video IDs are removed. Their child playback
+  -- rows have ON DELETE CASCADE and passed the user-boundary checks above.
+  delete from public.videos where id=any(videos);
+  delete from public.administrator_roles where discord_id=any(discords);
+  delete from public.authorized_discord_ids where discord_id=any(discords);
+  delete from public.profiles where id=any(users) and discord_id=any(discords);
+  if (select md5(coalesce(string_agg(to_jsonb(p)::text,'|' order by id),''))
+        from public.profiles p) <> '{{EXPECTED_PROFILES_MD5}}' or
+     (select md5(coalesce(string_agg(to_jsonb(w)::text,'|' order by discord_id),''))
+        from public.authorized_discord_ids w) <> '{{EXPECTED_WHITELIST_MD5}}' or
+     (select md5(coalesce(string_agg(to_jsonb(a)::text,'|' order by discord_id),''))
+        from public.administrator_roles a) <> '{{EXPECTED_ADMINS_MD5}}' then
+    raise exception 'protected-row fingerprint mismatch; rollback fixture cleanup';
+  end if;
+  if exists(select 1 from public.adp_upload_intents where operation_id=any(operations)) or
+     exists(select 1 from public.videos where id=any(videos)) or
+     exists(select 1 from public.profiles where id=any(users)) then
+    raise exception 'disposable fixture cleanup incomplete';
+  end if;
+end $$;
+commit;

@@ -1,0 +1,12 @@
+-- After reservation commits, submit on TWO independent connections together.
+-- Run one copy with HOLD_SECONDS=4 and the other with HOLD_SECONDS=0.
+begin;
+set local lock_timeout='8s';
+set local statement_timeout='20s';
+set local role service_role;
+select 'race_start', pg_backend_pid(), clock_timestamp();
+select pg_backend_pid() as backend_pid,
+  public.adp_claim_upload_intent_qc026(
+    '{{ACTOR_UUID}}'::uuid,'{{OPERATION_UUID}}'::uuid) as claimed;
+select pg_sleep({{HOLD_SECONDS}});
+commit;

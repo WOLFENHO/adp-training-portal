@@ -21,6 +21,25 @@ export function reconcileUploadCandidates(videoId, uploads) {
   return { action: 'bind', uploadId: match.id }
 }
 
+/** Conservative recovery for a lost provider-create response. A Mux upload
+ * has no creation timestamp in the SDK response, so use the earlier database
+ * reservation time as the URL deadline. Never infer an absence as permission
+ * to create another upload. */
+export function planRecoveredUpload(row, uploads, now, origin) {
+  if (!['needs_reconciliation', 'manual_review'].includes(row.status) || row.uploadId) return { action: 'manual_review' }
+  const matches = uploads.filter(upload => upload.new_asset_settings?.passthrough === row.videoId)
+  if (matches.length !== 1) return { action: 'manual_review' }
+  const upload = matches[0]
+  const reserved = Date.parse(row.createdAt)
+  const deadline = reserved + 3540_000
+  if (!Number.isFinite(reserved) || reserved > now.getTime() || deadline <= now.getTime() ||
+      upload.status !== 'waiting' || upload.timeout !== 3600 || upload.cors_origin !== origin ||
+      !upload.new_asset_settings?.playback_policies?.includes('signed') ||
+      typeof upload.id !== 'string' || !upload.id || typeof upload.url !== 'string' ||
+      !upload.url.startsWith('https://')) return { action: 'manual_review' }
+  return { action: 'bind', uploadId: upload.id, uploadUrl: upload.url, expiresAt: new Date(deadline).toISOString() }
+}
+
 /** Candidate review only. Never delete a provider upload or asset automatically. */
 export function findOrphanUploads(uploads, recordedVideoIds) {
   return uploads.filter(upload => {

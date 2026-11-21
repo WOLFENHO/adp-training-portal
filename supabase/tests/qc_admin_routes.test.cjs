@@ -8,7 +8,7 @@ const ts = appRequire('typescript')
 function load(file, mocks) {
   const source = ts.transpileModule(fs.readFileSync(file, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText
   const exports = {}
-  new Function('require', 'exports', source)((id) => id in mocks ? mocks[id] : id === '@/lib/error-registry.mjs' ? appRequire('./src/lib/error-registry.mjs') : appRequire(id), exports)
+  new Function('require', 'exports', source)((id) => id in mocks ? mocks[id] : id === '@/lib/training-access' ? { trainingUnlocked: async () => true } : id === '@/lib/error-registry.mjs' ? appRequire('./src/lib/error-registry.mjs') : appRequire(id), exports)
   return exports
 }
 
@@ -24,6 +24,7 @@ function admin(db, mux = {}, client = {}, currentMember = member) {
     '@/lib/error-registry.mjs': appRequire('./src/lib/error-registry.mjs'),
     '@/lib/api-errors.mjs': appRequire('./src/lib/api-errors.mjs'),
     '@/lib/upload-lifecycle.mjs': appRequire('./src/lib/upload-lifecycle.mjs'),
+    '@/lib/upload-intent.mjs': appRequire('./src/lib/upload-intent.mjs'),
     // Exercise the dormant implementation without opening the deployed gate.
     '@/lib/upload-gate.mjs': { uploadsEnabled: () => true },
     '@/lib/mux': { mux },
@@ -218,7 +219,7 @@ test('QC-005 progress RPC denial is sanitized while its authenticated context is
 test('QC-026 read-only review counts all provider pages without exposing upload URLs', async () => {
   const db = { from: name => {
     assert.equal(name, 'adp_upload_intents')
-    return { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { video_id: id, state: 'needs_reconciliation', mux_upload_id: null }, error: null }) }) }) }
+    return { select: () => ({ eq: () => ({ maybeSingle: async () => ({ data: { video_id: id, actor_id: id, state: 'needs_reconciliation', mux_upload_id: null }, error: null }) }) }) }
   } }
   const mux = { video: { uploads: { list: async function* () {
     yield { id: 'unrelated', new_asset_settings: { passthrough: 'other' }, url: 'secret-url' }

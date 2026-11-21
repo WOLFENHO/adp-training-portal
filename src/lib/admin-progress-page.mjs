@@ -32,7 +32,7 @@ export async function enrichProgressPage(db, page) {
     const current = verified.filter(matches)
     const summary = summarizeVideoProgress(video, row, current, historical.filter(matches))
     const identity = video.asset_id && `${video.asset_id}:${Number(video.duration_seconds).toFixed(3)}:12`
-    const verifiedRow = current.find(item => video.duration_precision_verified && !item.reset_at && item.validator_version === 12 && item.asset_id === video.asset_id && item.asset_identity === identity && Number(item.duration_seconds) === Number(video.duration_seconds))
+    const verifiedRow = current.find(item => video.duration_precision_verified && !item.reset_at && Boolean(item.verified_at) && item.validator_version === 12 && item.asset_id === video.asset_id && item.asset_identity === identity && Number(item.duration_seconds) === Number(video.duration_seconds))
     return { userId: row.user_id, videoId: row.video_id, username: member.username, title: video.title, durationSeconds: video.duration_seconds, status: summary.status, label: summary.label, percent: summary.percent, verifiedWatchedSeconds: summary.verifiedWatchedSeconds, historicalCompletedAt: summary.historicalCompletedAt, verifiedCompletedAt: verifiedRow?.verified_at ?? verifiedRow?.completed_at ?? null, hasHistoricalRecord: historical.some(matches) }
   })
 }

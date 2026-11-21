@@ -12,12 +12,12 @@ const schema = z.object({
   kind: z.enum(['play', 'pause', 'buffering', 'periodic', 'seek', 'complete']),
 })
 const headers = { 'Cache-Control': 'private, no-store, max-age=0', 'X-Content-Type-Options': 'nosniff' }
-const knownRpcErrors = new Set(['not authorized', 'client_upgrade_required', 'session_expired', 'session_inactive', 'session_not_found', 'session_version_mismatch'])
+const knownRpcErrors = new Set(['not authorized', 'training_locked', 'client_upgrade_required', 'session_expired', 'session_inactive', 'session_not_found', 'session_version_mismatch'])
 const conflictCodes = new Set(['stale_version', 'stale_event', 'request_id_reused', 'session_expired', 'session_inactive', 'sequence_out_of_range'])
 
 export async function POST(request: Request) {
   const correlationId = randomUUID()
-  const fail = (status: number, code: string, error: string) => NextResponse.json({ accepted: false, code, error, errorId: code === 'forbidden' ? 'ADP-AUTH-003' : 'ADP-PRG-006', correlationId }, { status, headers })
+  const fail = (status: number, code: string, error: string) => NextResponse.json({ accepted: false, code, error, errorId: code === 'forbidden' ? 'ADP-AUTH-003' : code === 'training_locked' ? 'ADP-PRG-011' : 'ADP-PRG-006', correlationId }, { status, headers })
   if (!sameOriginMutation(request)) return fail(403, 'forbidden', 'Request origin rejected.')
   let member
   try { member = await getMember() } catch {
@@ -37,14 +37,14 @@ export async function POST(request: Request) {
     return fail(503, 'playback_schema_unavailable', 'Verified playback is temporarily unavailable.')
   }
   const input = parsed.data
-  const { data, error } = await supabase.rpc('record_playback_heartbeat_r12', {
+  const { data, error } = await supabase.rpc('adp_training_heartbeat_r121', {
     p_session_id: input.sessionId, p_request_id: input.requestId,
     p_expected_version: input.expectedVersion, p_client_sequence: input.clientSequence,
     p_position: input.position, p_is_playing: input.isPlaying, p_kind: input.kind,
   })
   if (error) {
     const code = knownRpcErrors.has(error.message) ? error.message : 'heartbeat_unavailable'
-    const status = code === 'not authorized' ? 403 : code === 'client_upgrade_required' ? 426 : code.startsWith('session_') ? 409 : 503
+    const status = code === 'not authorized' || code === 'training_locked' ? 403 : code === 'client_upgrade_required' ? 426 : code.startsWith('session_') ? 409 : 503
     console.error('[ADP playback] heartbeat RPC error', { correlationId, code, databaseCode: error.code ?? null })
     return fail(status, code, code === 'heartbeat_unavailable' ? 'Progress could not be saved. Retry when your connection is stable.' : code)
   }

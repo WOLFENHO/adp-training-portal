@@ -17,6 +17,7 @@ function loadAdminRoute(calls) {
     '@/lib/api-errors.mjs': { sameOriginMutation: () => true },
     '@/lib/mux-duration-sync.mjs': { syncMuxUpload: () => { throw Error('Mux reached') } },
     '@/lib/upload-lifecycle.mjs': { createOrResumeUpload: () => { throw Error('upload lifecycle reached') } },
+    '@/lib/upload-intent.mjs': { planRecoveredUpload: () => { throw Error('upload recovery reached') } },
     '@/lib/upload-gate.mjs': requireModule('../../src/lib/upload-gate.mjs'),
     '@/lib/admin-pages.mjs': { collectPages: () => { throw Error('admin paging reached') } },
     '@/lib/error-registry.mjs': {

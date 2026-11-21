@@ -2,7 +2,7 @@ export function summarizeVideoProgress(video, progress, verifiedRows = [], histo
   const identity = video.asset_id && video.duration_precision_verified
     ? `${video.asset_id}:${Number(video.duration_seconds).toFixed(3)}:12` : null
   const currentVerified = Boolean(video.duration_precision_verified && video.asset_id && verifiedRows.some((row) =>
-    row.validator_version === 12 && row.asset_identity === identity && identity !== null && !row.reset_at && row.asset_id === video.asset_id &&
+    row.validator_version === 12 && row.asset_identity === identity && identity !== null && !row.reset_at && Boolean(row.verified_at) && row.asset_id === video.asset_id &&
     Number(row.duration_seconds) === Number(video.duration_seconds),
   ))
   const historicalDates = [
@@ -10,7 +10,7 @@ export function summarizeVideoProgress(video, progress, verifiedRows = [], histo
     ...historicalRows.map((row) => row.completed_at),
     ...verifiedRows
       .filter((row) => row.validator_version === 12 &&
-        !(row.asset_identity === identity && identity !== null && !row.reset_at && video.duration_precision_verified && row.asset_id === video.asset_id && Number(row.duration_seconds) === Number(video.duration_seconds)))
+        !(row.asset_identity === identity && identity !== null && !row.reset_at && Boolean(row.verified_at) && video.duration_precision_verified && row.asset_id === video.asset_id && Number(row.duration_seconds) === Number(video.duration_seconds)))
       .map((row) => row.completed_at),
   ].filter(Boolean)
   const watched = Math.max(0, Number(progress?.verified_watched_seconds ?? 0))

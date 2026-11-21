@@ -1,1 +1,1 @@
-export function uploadsEnabled(): boolean
+export function uploadsEnabled(env?: NodeJS.ProcessEnv): boolean

@@ -16,6 +16,8 @@ test('QC-017 completion-only records are visible without a progress row', async 
   assert.equal(historicalPage[0].status, 'Historical completion')
   assert.equal(verifiedPage[0].hasProgress, false)
   assert.equal(verifiedPage[0].status, 'Current verified completion')
+  const unbound = await enrichCompletionPage(db(), [{ ...verified, verified_at: null }], 'verified')
+  assert.equal(unbound[0].status, 'Previous verified evidence')
 })
 
 test('QC-017 stale asset completion stays visible as historical evidence', async () => {

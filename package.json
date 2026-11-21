@@ -14,7 +14,7 @@
     "test:maintenance": "node --test supabase/tests/maintenance_routes.test.mjs",
     "test:release-concurrency": "node supabase/tests/release_1_2_1_concurrency.mjs",
     "test:heartbeat-response": "node --test supabase/tests/heartbeat_response.test.mjs",
-    "test": "node --test supabase/tests/*.test.mjs supabase/tests/*.test.cjs src/lib/*.test.mjs"
+    "test": "node --test supabase/tests/*.test.mjs supabase/tests/*.test.cjs src/lib/*.test.mjs src/lib/supabase/*.test.mjs"
   },
   "dependencies": {
     "@mux/mux-player-react": "^3.14.1",

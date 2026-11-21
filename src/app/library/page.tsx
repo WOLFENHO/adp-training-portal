@@ -6,13 +6,14 @@ import type { Video } from '@/lib/types'
 import { thumbnailToken } from '@/lib/mux'
 import { summarizeVideoProgress } from '@/lib/progress-status.mjs'
 import { requiredQuery } from '@/lib/required-query.mjs'
+import { trainingSequence } from '@/lib/training-progression.mjs'
 
 export const dynamic = 'force-dynamic'
 
 export default async function Library() {
   const member = await requireMember()
   const [videosResult, rowsResult, historyResult, verifiedResult] = await Promise.all([
-    adminDb.from('videos').select('*').eq('published', true).order('sort_order'),
+    adminDb.from('videos').select('*').eq('published', true).order('sort_order').order('id'),
     adminDb.from('user_video_progress').select('video_id,verified_watched_seconds,completed_at').eq('user_id', member.id),
     adminDb.from('completion_records').select('video_id,completed_at,method').eq('user_id', member.id),
     adminDb.from('verified_completion_records').select('video_id,asset_id,duration_seconds,completed_at,validator_version,asset_identity,reset_at,verified_at').eq('user_id', member.id),
@@ -22,6 +23,7 @@ export default async function Library() {
   const history = requiredQuery(historyResult, 'history')
   const verified = requiredQuery(verifiedResult, 'verified')
   const progress = new Map((rows ?? []).map((row: any) => [row.video_id, row]))
+  const unlocked = trainingSequence(videos ?? [], verified ?? [])
   const thumbnailTokens = new Map(await Promise.all((videos ?? []).filter((video) => video.playback_id)
     .map(async (video) => [video.id, await thumbnailToken(video.playback_id!, video.duration_seconds)] as const)))
 
@@ -34,16 +36,18 @@ export default async function Library() {
         (history ?? []).filter((row) => row.video_id === video.id))
       const thumb = video.thumbnail_url ?? (video.playback_id
         ? `https://image.mux.com/${video.playback_id}/thumbnail.jpg?token=${thumbnailTokens.get(video.id)}` : null)
-      return <Link href={`/videos/${video.id}`} className="card" key={video.id}>
+      const card = <>
         {thumb ? <img className="thumb" src={thumb} alt=""/> : <div className="thumb" aria-hidden="true"/>}
         <div className="card-body"><h2>{video.title}</h2><p>{video.description}</p>
           <div className="meta"><span>{Math.floor(video.duration_seconds / 60)} min</span>
-            <span className={`status ${summary.status}`}>{summary.label}</span></div>
+            <span className={`status ${summary.status}`}>{unlocked[video.id] ? summary.label : 'Locked'}</span></div>
           {summary.historicalCompletedAt && !summary.currentVerified && <p className="historical-note">Historical completion retained; current verified coverage is shown below.</p>}
           <div className="bar"><span style={{width:`${summary.percent}%`}}/></div>
           <small>{summary.percent}% verified coverage</small>
-        </div>
-      </Link>
+        </div></>
+      return unlocked[video.id]
+        ? <Link href={`/videos/${video.id}`} className="card" key={video.id}>{card}</Link>
+        : <div className="card" key={video.id} aria-label={`${video.title} locked until previous modules have verified completion`}>{card}</div>
     })}</div> : <div className="empty">No training videos have been published yet.</div>}
   </section></main>
 }

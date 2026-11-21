@@ -4,12 +4,13 @@ import { z } from 'zod'
 import { getMember } from '@/lib/auth'
 import { adminDb } from '@/lib/supabase/admin'
 import { createHash, randomUUID } from 'crypto'
-import { syncMuxUpload } from '@/lib/mux-duration-sync.mjs'
+import { syncMuxUpload, verifyNewMuxUpload } from '@/lib/mux-duration-sync.mjs'
 import { assertDashboardSize, collectPages } from '@/lib/admin-pages.mjs'
 import { identifyError, sanitizeApiError } from '@/lib/error-registry.mjs'
 import { sameOriginMutation } from '@/lib/api-errors.mjs'
 import { createOrResumeUpload } from '@/lib/upload-lifecycle.mjs'
 import { uploadsEnabled } from '@/lib/upload-gate.mjs'
+import { planRecoveredUpload } from '@/lib/upload-intent.mjs'
 
 const privateHeaders = { 'Cache-Control': 'private, no-store, max-age=0', 'X-Content-Type-Options': 'nosniff' }
 
@@ -55,6 +56,7 @@ const schema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('access'), discordId: z.string().regex(/^\d{5,25}$/), enabled: z.boolean() }),
   z.object({ action: z.literal('video-create'), operationId: z.string().uuid(), videoId: z.string().uuid(), title: z.string().min(1).max(180), description: z.string().max(4000).default('') }),
   z.object({ action: z.literal('upload-review'), operationId: z.string().uuid() }),
+  z.object({ action: z.literal('upload-reconcile'), operationId: z.string().uuid() }),
   z.object({ action: z.literal('video-update'), videoId: z.string().uuid(), title: z.string().min(1).max(180), description: z.string().max(4000), thumbnailUrl: z.string().url().nullable().optional(), published: z.boolean(), sortOrder: z.number().int() }),
   z.object({ action: z.literal('video-delete'), videoId: z.string().uuid() }),
   z.object({ action: z.literal('progress-reset'), userId: z.string().uuid(), videoId: z.string().uuid() }),
@@ -93,31 +95,60 @@ async function handleAdminPost(request: Request, correlationId: string) {
   const parsed = schema.safeParse(await request.json().catch(() => null))
   if (!parsed.success) return NextResponse.json({ error: 'invalid_request', details: parsed.error.flatten() }, { status: 400 })
   const input = parsed.data
-  if ((input.action === 'video-create' || input.action === 'upload-review') && !uploadsEnabled()) {
+  if ((input.action === 'video-create' || input.action === 'upload-review' || input.action === 'upload-reconcile') && !uploadsEnabled()) {
     return NextResponse.json({ error: 'uploads_disabled' }, { status: 503 })
   }
   let result: any = { ok: true }
 
-  if (input.action === 'upload-review') {
+  if (input.action === 'upload-review' || input.action === 'upload-reconcile') {
     const { data: intent, error } = await adminDb.from('adp_upload_intents')
-      .select('video_id,state,mux_upload_id').eq('operation_id', input.operationId).maybeSingle()
+      .select('video_id,actor_id,state,mux_upload_id,url_expires_at,created_at').eq('operation_id', input.operationId).maybeSingle()
     if (error) return NextResponse.json({ error: 'upload_requires_reconciliation' }, { status: 503 })
     if (!intent) return NextResponse.json({ error: 'not_found' }, { status: 404 })
+    if (intent.actor_id !== member.id) return NextResponse.json({ error: 'forbidden' }, { status: 403 })
     if (!process.env.MUX_TOKEN_ID || !process.env.MUX_TOKEN_SECRET) return NextResponse.json({ error: 'mux_credentials_missing' }, { status: 503 })
     const { mux } = await import('@/lib/mux')
-    let matches = 0, inspected = 0
+    let matches = 0, inspected = 0, matchedUpload: any = null
     try {
       // SDK auto-pagination is exhaustive. Do not infer absence from one page.
       for await (const upload of mux.video.uploads.list({ limit: 100 })) {
         if (++inspected > 10000) throw Error('provider inventory exceeds review bound')
-        if (upload.new_asset_settings?.passthrough === intent.video_id) matches++
+        if (upload.new_asset_settings?.passthrough === intent.video_id) {
+          matches++
+          matchedUpload = upload
+        }
       }
     } catch {
       return NextResponse.json({ error: 'upload_requires_reconciliation' }, { status: 503 })
     }
+    const target: { id: string; status: string } | null = matchedUpload
+    const retryable = matches === 1 && intent.state === 'waiting' &&
+      target?.id === intent.mux_upload_id && target?.status === 'waiting' &&
+      typeof intent.url_expires_at === 'string' && Date.parse(intent.url_expires_at) > Date.now()
+    if (input.action === 'upload-reconcile') {
+      const plan = planRecoveredUpload({ videoId: intent.video_id, status: intent.state,
+        uploadId: intent.mux_upload_id, createdAt: intent.created_at },
+        matches === 1 ? [matchedUpload] : [], new Date(), new URL(request.url).origin)
+      if (plan.action !== 'bind') return NextResponse.json({ error: 'upload_requires_reconciliation' }, { status: 409 })
+      // A fresh provider read prevents binding a stale or replaced inventory entry.
+      const provider = await mux.video.uploads.retrieve(plan.uploadId).catch(() => null)
+      const fresh = planRecoveredUpload({ videoId: intent.video_id, status: intent.state,
+        uploadId: intent.mux_upload_id, createdAt: intent.created_at },
+        provider ? [provider] : [], new Date(), new URL(request.url).origin)
+      if (fresh.action !== 'bind' || fresh.uploadId !== plan.uploadId || fresh.uploadUrl !== plan.uploadUrl) {
+        return NextResponse.json({ error: 'upload_requires_reconciliation' }, { status: 409 })
+      }
+      const { data: bound, error: bindingError } = await adminDb.rpc('adp_reconcile_upload_intent_qc026', {
+        p_actor_id: member.id, p_operation_id: input.operationId, p_upload_id: fresh.uploadId,
+        p_upload_url: fresh.uploadUrl, p_expires_at: fresh.expiresAt,
+      })
+      if (bindingError || bound !== true) return NextResponse.json({ error: 'upload_requires_reconciliation' }, { status: 409 })
+      return NextResponse.json({ ok: true, videoId: intent.video_id, uploadId: fresh.uploadId,
+        uploadUrl: fresh.uploadUrl, status: 'waiting' })
+    }
     return NextResponse.json({ ok: true, videoId: intent.video_id, state: intent.state,
       providerMatches: matches, boundUploadPresent: Boolean(intent.mux_upload_id),
-      manualReviewRequired: matches !== 1 || !['waiting','asset_created'].includes(intent.state) })
+      manualReviewRequired: !retryable })
   }
 
   if (input.action === 'mux-sync') {
@@ -126,11 +157,6 @@ async function handleAdminPost(request: Request, correlationId: string) {
     if (process.env.MUX_METADATA_SYNC_ENABLED !== 'true') {
       return NextResponse.json({ error: 'metadata_sync_disabled' }, { status: 503 })
     }
-    // This service-role readiness RPC is available only while Release 1.2.1
-    // is ready and the database playback gate remains off. Keep it separate
-    // from playback readiness so metadata verification cannot open playback.
-    const readiness = await adminDb.rpc('adp_metadata_sync_integrity_version')
-    if (readiness.error || readiness.data !== 121) return NextResponse.json({ error: 'metadata_sync_unavailable' }, { status: 503 })
     if (!process.env.MUX_TOKEN_ID || !process.env.MUX_TOKEN_SECRET || !process.env.MUX_SIGNING_KEY_ID || !process.env.MUX_SIGNING_PRIVATE_KEY) {
       return NextResponse.json({ error: 'mux_credentials_missing' }, { status: 503 })
     }
@@ -143,26 +169,24 @@ async function handleAdminPost(request: Request, correlationId: string) {
     if (!video?.mux_upload_id) return NextResponse.json({ error: 'mux_upload_missing' }, { status: 404 })
     if (video.duration_precision_verified) return NextResponse.json({ error: 'metadata_already_verified' }, { status: 409 })
     const { mux } = await import('@/lib/mux')
+    // The QC-026 table is optional for legacy videos until its reviewed
+    // installation. An absent table means only the maintenance-only path exists.
     const { data: intent, error: intentError } = await adminDb.from('adp_upload_intents')
       .select('operation_id,video_id,mux_upload_id').eq('video_id', input.videoId).maybeSingle()
-    if (intentError) return NextResponse.json({ error: 'upload_requires_reconciliation' }, { status: 503 })
+    if (intentError && !['42P01','PGRST205'].includes(intentError.code ?? '')) return NextResponse.json({ error: 'upload_requires_reconciliation' }, { status: 503 })
     if (intent) {
-      const providerUpload = await mux.video.uploads.retrieve(video.mux_upload_id).catch(() => null)
-      if (intent.video_id !== input.videoId || intent.mux_upload_id !== video.mux_upload_id ||
-          providerUpload?.id !== video.mux_upload_id || providerUpload?.new_asset_settings?.passthrough !== input.videoId) {
+      if (intent.video_id !== input.videoId || intent.mux_upload_id !== video.mux_upload_id) {
         return NextResponse.json({ error: 'upload_requires_reconciliation' }, { status: 409 })
       }
+      const fresh = await verifyNewMuxUpload({ videoId: input.videoId, uploadId: video.mux_upload_id, actorId: member.id }, { mux, adminDb })
+      return NextResponse.json(fresh.verified ? { ok: true, verified: true } : { error: 'upload_requires_reconciliation' },
+        { status: fresh.verified ? 200 : 503 })
     }
+    // Legacy videos keep the deployed maintenance-only metadata contract.
+    const readiness = await adminDb.rpc('adp_metadata_sync_integrity_version')
+    if (readiness.error || readiness.data !== 121) return NextResponse.json({ error: 'metadata_sync_unavailable' }, { status: 503 })
     const syncResult = await syncMuxUpload(video.mux_upload_id, { mux, adminDb, correlationId })
     if (syncResult.verified) {
-      if (intent) {
-        const finalized = await adminDb.rpc('adp_finalize_upload_intent_qc026', { p_actor_id: member.id, p_video_id: input.videoId })
-        if (finalized.error || finalized.data !== true) {
-          console.error('[ADP admin] Upload metadata saved but intent finalization requires review',
-            { correlationId, errorId: 'ADP-ADM-019', databaseCode: finalized.error?.code ?? null })
-          return NextResponse.json({ error: 'upload_requires_reconciliation' }, { status: 503 })
-        }
-      }
       const { error: auditError } = await adminDb.from('admin_audit_log').insert({
         admin_id: member.id, action: 'mux-sync', details: { videoId: input.videoId, verified: true },
       })
@@ -220,10 +244,20 @@ async function handleAdminPost(request: Request, correlationId: string) {
         const { error } = await adminDb.rpc('adp_mark_upload_review_qc026', { p_actor_id: member.id, p_operation_id: input.operationId })
         if (error) throw error
       },
+      async verifyBinding(row: { videoId: string; uploadId: string; assetId: string; playbackId: string }) {
+        const { data, error } = await adminDb.from('videos')
+          .select('id,mux_upload_id,asset_id,playback_id,duration_precision_verified')
+          .eq('id', row.videoId).maybeSingle()
+        return !error && data?.id === row.videoId && data.mux_upload_id === row.uploadId &&
+          data.asset_id === row.assetId && data.playback_id === row.playbackId &&
+          data.duration_precision_verified === true
+      },
     }
     try {
       const { mux } = await import('@/lib/mux')
       const target = await createOrResumeUpload({ ledger, mux: {
+        retrieve: (uploadId: string) => mux.video.uploads.retrieve(uploadId),
+        retrieveAsset: (assetId: string) => mux.video.assets.retrieve(assetId),
         async create(videoId: string) {
           const upload = await mux.video.uploads.create({ cors_origin: new URL(request.url).origin,
             timeout: 3600, new_asset_settings: { playback_policies: ['signed'], video_quality: 'basic', passthrough: videoId } })
@@ -234,6 +268,9 @@ async function handleAdminPost(request: Request, correlationId: string) {
           return { id: upload.id, url: upload.url, expiresAt: new Date(Date.now() + 3540_000).toISOString() }
         },
       } }, operation)
+      if (target.action === 'complete') {
+        return NextResponse.json({ ok: true, videoId: target.videoId, uploadId: target.uploadId, status: 'asset_created' })
+      }
       if (target.action !== 'reuse') return NextResponse.json({ error: 'upload_requires_reconciliation' }, { status: 409 })
       return NextResponse.json({ ok: true, videoId: target.videoId, uploadId: target.uploadId, uploadUrl: target.uploadUrl })
     } catch (error) {

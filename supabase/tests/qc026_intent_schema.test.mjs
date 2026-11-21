@@ -24,3 +24,11 @@ test('QC-026 isolated ledger has unique idempotency identity and no client URL a
   assert.match(sql, /before insert or update on public\.adp_upload_intents/)
   assert.match(sql, /if tg_op='INSERT' then/)
 })
+
+test('QC-026 removes inherited default table grants before allowing only server reads and writes', () => {
+  const sql = fs.readFileSync('supabase/batch3/qc026_upload_intents_candidate.sql', 'utf8')
+  const revoke = 'revoke all on public.adp_upload_intents from public,anon,authenticated,service_role;'
+  const grant = 'grant select,insert,update on public.adp_upload_intents to service_role;'
+  assert.ok(sql.includes(revoke) && sql.indexOf(grant) > sql.indexOf(revoke))
+  assert.doesNotMatch(sql, /grant\s+(?:delete|truncate)\b[^;]*\bon public\.adp_upload_intents\b/i)
+})

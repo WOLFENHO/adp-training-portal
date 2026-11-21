@@ -26,6 +26,7 @@ test('QC-025 session route redacts database failure from response and diagnostic
     '@/lib/auth': { getMember: async () => ({ id: 'fixture' }) },
     '@/lib/supabase/server': { createClient: async () => ({ rpc: async (name) => name === 'adp_playback_integrity_version' ? { data: 121, error: null } : { data: null, error: { code: 'XX000', message: canary } } }) },
     '@/lib/api-errors.mjs': { safeSessionRpcError, sameOriginMutation },
+    '@/lib/training-access': { trainingUnlocked: async () => true },
   })[id] ?? appRequire(id), exports)
   const previous = process.env.PLAYBACK_HEARTBEATS_ENABLED
   const log = console.error

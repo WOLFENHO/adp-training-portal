@@ -8,6 +8,7 @@ import { playbackToken } from '@/lib/mux'
 import { getPlaybackGate } from '@/lib/playback-gate'
 import { summarizeVideoProgress } from '@/lib/progress-status.mjs'
 import { requiredQuery } from '@/lib/required-query.mjs'
+import { trainingUnlocked } from '@/lib/training-access'
 
 export const dynamic = 'force-dynamic'
 
@@ -31,12 +32,15 @@ export default async function Watch({params}:{params:Promise<{id:string}>}) {
     .map((row) => ({start_seconds:row.start_seconds,end_seconds:video.duration_precision_verified?row.completion_end_seconds:row.end_seconds}))
     .filter((row) => row.end_seconds !== null)
   const gate = await getPlaybackGate()
-  const token = gate.enabled && video.playback_id ? await playbackToken(video.playback_id,video.duration_seconds) : undefined
+  const unlocked = gate.enabled ? await trainingUnlocked(id).catch(() => null) : false
+  const token = gate.enabled && unlocked === true && video.playback_id ? await playbackToken(video.playback_id,video.duration_seconds) : undefined
   const summary = summarizeVideoProgress(video,progress,verified ?? [],history ?? [])
   return <main className="shell"><Header member={member}/><section className="page">
     <Link href="/library" className="eyebrow">← Return to library</Link>
     <h1>{video.title}</h1><p className="sub">{video.description}</p>
     {summary.status==='historical_completed'&&<div className="notice">A historical completion is on record. It is not verified coverage of this video version.</div>}
+    {gate.enabled && unlocked === false && <div className="notice">Complete earlier training modules to unlock this video.</div>}
+    {gate.enabled && unlocked === null && <div className="notice">Training access is temporarily unavailable. Try again later.</div>}
     <VideoPlayer videoId={id} playbackId={token ? video.playback_id : null} token={token} duration={video.duration_seconds}
       initialIntervals={visibleIntervals} complete={summary.currentVerified} durationVerified={Boolean(video.duration_precision_verified)}/>
     <div className="stat-row"><span>Verified coverage<strong>{summary.percent}%</strong></span>

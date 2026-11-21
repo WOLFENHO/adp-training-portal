@@ -6,6 +6,7 @@ import { getPlaybackGate } from '@/lib/playback-gate'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
 import { identifyError } from '@/lib/error-registry.mjs'
+import { trainingUnlocked } from '@/lib/training-access'
 
 const headers = { 'Cache-Control': 'private, no-store, max-age=0', 'X-Content-Type-Options': 'nosniff' }
 
@@ -44,6 +45,10 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
   if (!video?.playback_id || (!video.published && !member.is_admin)) {
     return fail(404, 'not_found')
   }
+
+  try {
+    if (!await trainingUnlocked(id)) return fail(403, 'training_locked', 'Complete earlier training modules first.')
+  } catch { return fail(503, 'playback_schema_unavailable') }
 
   try {
     return NextResponse.json({ token: await playbackToken(video.playback_id, video.duration_seconds) }, { headers })

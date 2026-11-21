@@ -18,7 +18,7 @@ export async function enrichCompletionPage(db, page, view) {
     if (!lesson || !username) throw Error('completion reference unavailable')
     const current = view === 'verified' && Boolean(lesson.duration_precision_verified && lesson.asset_id &&
       row.asset_id === lesson.asset_id && Number(row.duration_seconds) === Number(lesson.duration_seconds) &&
-      row.validator_version === 12 && !row.reset_at && row.asset_identity === `${lesson.asset_id}:${Number(lesson.duration_seconds).toFixed(3)}:12`)
+      row.validator_version === 12 && !row.reset_at && Boolean(row.verified_at) && row.asset_identity === `${lesson.asset_id}:${Number(lesson.duration_seconds).toFixed(3)}:12`)
     return {
       userId: row.user_id, videoId: row.video_id, username, title: lesson.title,
       hasProgress: progress.has(`${row.user_id}:${row.video_id}`),

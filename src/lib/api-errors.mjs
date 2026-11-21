@@ -2,6 +2,7 @@ const sessionErrors = {
   'not authorized': { status: 403, code: 'forbidden', errorId: 'ADP-AUTH-003' },
   session_expired: { status: 409, code: 'session_expired', errorId: 'ADP-PRG-002' },
   session_inactive: { status: 409, code: 'session_inactive', errorId: 'ADP-PRG-003' },
+  training_locked: { status: 403, code: 'training_locked', errorId: 'ADP-PRG-011' },
 }
 
 export function safeSessionRpcError(error) {
