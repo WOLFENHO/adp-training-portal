@@ -34,7 +34,7 @@ for (const environment of ['production', 'preview']) {
   test(`QC-026 ${environment} direct POST cannot start or review uploads while disabled`, async () => {
     const previous = { VERCEL_ENV: process.env.VERCEL_ENV, ADP_UPLOADS_ENABLED: process.env.ADP_UPLOADS_ENABLED }
     process.env.VERCEL_ENV = environment
-    process.env.ADP_UPLOADS_ENABLED = 'true' // even a misconfigured Preview cannot bypass this release gate
+    delete process.env.ADP_UPLOADS_ENABLED
     try {
       const calls = []
       const admin = loadAdminRoute(calls)
@@ -57,3 +57,9 @@ for (const environment of ['production', 'preview']) {
     }
   })
 }
+
+test('upload switch defaults closed and accepts only true', () => {
+ const { uploadsEnabled } = requireModule('../../src/lib/upload-gate.mjs')
+ for (const value of [undefined, '', 'false', 'TRUE', '1']) assert.equal(uploadsEnabled({ ADP_UPLOADS_ENABLED: value }), false)
+ assert.equal(uploadsEnabled({ ADP_UPLOADS_ENABLED: 'true' }), true)
+})
